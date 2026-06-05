@@ -77,9 +77,38 @@ GitHub access, so everything you need is here:
 8. **Commit** your code changes with a clear message (do NOT commit `.afk/`). Then output
    `<promise>COMPLETE</promise>`.
 
-# IF YOU GET STUCK
+# BAIL FAST ON ENVIRONMENT PROBLEMS — DO NOT RABBIT-HOLE
 
-If you genuinely cannot make the gate green (flaky environment, missing context, the issue is
-underspecified), still run `afk-gate.sh` so the host sees the real red verdict, write what blocked
-you into `.afk/summary.md`, commit what you have, and output `<promise>COMPLETE</promise>`.
-The host will route the issue to a human — that's a fine outcome, better than faking green.
+Your job is **this one issue**, not repairing the toolchain. The single biggest way you waste
+time and tokens is grinding on infrastructure that isn't your fault. Don't.
+
+**Tell the two apart:**
+- **Caused by your change** (a test you broke, a type error in your code, your feature not
+  working) → fix it. That's the job.
+- **Pre-existing / environmental** — missing native binaries, the app won't install or boot, a
+  broken dependency, a failure that exists on a clean checkout of the base branch too → **NOT
+  yours to fix.** Quick sanity check: would `git stash` (dropping your changes) make the error go
+  away? If yes, it's environmental.
+
+**When it's environmental, bail after AT MOST one or two quick attempts** (a few minutes, not an
+hour). To bail:
+
+1. Commit whatever real progress you made (specific paths only — never `node_modules`/lockfiles).
+2. Write `.afk/blocked.json`:
+   ```json
+   { "reason": "one line — what's broken", "detail": "what you saw + what you tried" }
+   ```
+3. Write the same into `.afk/summary.md`.
+4. Output `<promise>COMPLETE</promise>`.
+
+The host will **push your branch and tag the issue for a human** — your partial work is kept, not
+thrown away. Bailing early on a tooling problem is the **correct, expected** outcome. Spending an
+hour and a chunk of the token budget fixing someone else's broken install is a failure, even if it
+eventually works.
+
+# IF YOU'RE STUCK ON YOUR OWN CODE
+
+If the failure *is* yours but you can't get the gate green (genuinely hard, underspecified issue),
+still run `afk-gate.sh` so the host sees the real red verdict, write what blocked you into
+`.afk/summary.md`, commit what you have, and output `<promise>COMPLETE</promise>`. The host routes
+it to a human — a fine outcome, far better than faking green.

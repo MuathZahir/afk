@@ -58,6 +58,18 @@ function loadDotenv(file: string): void {
 const isRateLimit = (e: unknown): boolean =>
   /rate.?limit|usage limit|quota exceeded|429|overloaded/i.test(String((e as Error)?.message ?? e));
 
+// Serialize host-side git writes — parallel workers share ONE host repo; two concurrent
+// `checkout + merge` would corrupt the working tree.
+let gitChain: Promise<unknown> = Promise.resolve();
+function withGitLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  const next = gitChain.then(() => fn());
+  gitChain = next.catch(() => {});
+  return next;
+}
+const branchAhead = (branch: string): boolean => {
+  try { return Number(git(["rev-list", "--count", `${BASE_BRANCH}..${branch}`]).trim()) > 0; } catch { return false; }
+};
+
 // ── deterministic planner ────────────────────────────────────────────────────
 type Issue = { number: number; title: string; body: string };
 type Picked = { number: number; title: string; branch: string };
@@ -88,10 +100,20 @@ function pick(remaining: number): Picked[] {
 }
 
 // ── reporting side-effects (host only) ───────────────────────────────────────
-function escalate(num: number, reason: string, detail = ""): void {
+// Route an issue to a human. If `branch` is given (the worker committed real work), push it
+// so a human can continue, and return true so the caller keeps the branch (doesn't delete it).
+function escalate(num: number, reason: string, detail = "", branch?: string): boolean {
+  let preserved = false;
+  let branchNote = "";
+  if (branch) {
+    preserved = true; // keep the branch locally regardless
+    try { git(["push", "-u", "origin", branch]); branchNote = `\n\n🌿 Partial work pushed to branch \`${branch}\` — continue from there or open a PR.`; }
+    catch { branchNote = `\n\n🌿 Partial work kept on local branch \`${branch}\`.`; }
+  }
   gh(["issue", "comment", String(num), "--body",
-    `> *Posted by AFK.*\n\n🛑 **Could not finish autonomously.**\n\n${reason}\n${detail}`]);
+    `> *Posted by AFK.*\n\n🛑 **Needs a human.**\n\n${reason}\n${detail}${branchNote}`]);
   try { gh(["issue", "edit", String(num), "--remove-label", L_READY, "--add-label", L_HUMAN]); } catch { /* labels may not exist */ }
+  return preserved;
 }
 let releaseReady = false;
 function ensureRelease(): void {
@@ -133,6 +155,8 @@ type Result = { num: number; title: string; status: string; media?: number };
 async function processIssue(p: Picked, results: Result[]): Promise<void> {
   const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
   let sandbox: sandcastle.Sandbox | undefined;
+  let preserve = false;   // keep+pushed the branch for a human → don't delete it
+  let merged = false;     // work landed on base → delete the branch
   try {
     sandbox = await sandcastle.createSandbox({
       sandbox: docker({ imageName: WORKER_IMAGE }),
@@ -154,35 +178,56 @@ async function processIssue(p: Picked, results: Result[]): Promise<void> {
         signal: ac.signal,
       });
       commits = r.commits.length;
+    } catch (e) {
+      if (isRateLimit(e)) throw e;            // let the main loop stop the whole run cleanly
+      // timeout or run error — preserve any partial commits the worker made before dying
+      const reason = ac.signal.aborted ? `Worker timed out after ${CFG.issueTimeoutMin}m.` : "Worker errored before finishing.";
+      preserve = escalate(p.number, reason, `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, branchAhead(p.branch) ? p.branch : undefined);
+      results.push({ num: p.number, title: p.title, status: ac.signal.aborted ? "timeout" : "error" });
+      return;
     } finally { clearTimeout(timer); }
 
     // host-read artifacts from the bind-mounted worktree
     const afk = path.join(sandbox.worktreePath, ".afk");
     const gate = readJson(path.join(afk, "gate.json"));         // {typecheck,unit,log} — written by the SCRIPT
     const e2e = readJson(path.join(afk, "e2e.json"));           // {ok,note} — worker's browser verdict, or null
+    const blocked = readJson(path.join(afk, "blocked.json"));   // {reason,detail} — worker bailed on an env problem
     const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
+    const workBranch = commits > 0 ? p.branch : undefined;      // only preserve a branch that has real work
 
-    if (commits === 0) { results.push({ num: p.number, title: p.title, status: "no-commits" }); escalate(p.number, "The worker produced no commits."); return; }
-    if (!gate) { results.push({ num: p.number, title: p.title, status: "no-gate" }); escalate(p.number, "No `.afk/gate.json` — the worker never ran `afk-gate`, so nothing is verified."); return; }
+    if (commits === 0 && !blocked) { results.push({ num: p.number, title: p.title, status: "no-commits" }); escalate(p.number, "The worker produced no commits."); return; }
+
+    // worker chose to bail (env broken / not its fault) — preserve the partial work, don't grind.
+    if (blocked) {
+      preserve = escalate(p.number, `The worker bailed: ${blocked.reason ?? "blocked"}.`, blocked.detail ? `\n${blocked.detail}` : "", workBranch);
+      results.push({ num: p.number, title: p.title, status: "blocked" });
+      return;
+    }
+
+    if (!gate) { preserve = escalate(p.number, "No `.afk/gate.json` — the worker never ran `afk-gate`, so nothing is verified.", "", workBranch); results.push({ num: p.number, title: p.title, status: "no-gate" }); return; }
 
     // hard gate (deterministic): typecheck + unit. soft gate: the worker's browser verdict.
     if (gate.typecheck !== true || gate.unit !== true) {
+      preserve = escalate(p.number, "Hard gate failed — not merging.",
+        `\n| check | result |\n|---|---|\n| typecheck | ${verdict(gate.typecheck)} |\n| unit | ${verdict(gate.unit)} |\n\n<details><summary>gate log</summary>\n\n\`\`\`\n${(gate.log ?? "").slice(-4000)}\n\`\`\`\n</details>`, workBranch);
       results.push({ num: p.number, title: p.title, status: "gate-fail" });
-      escalate(p.number, "Hard gate failed — not merging.",
-        `\n| check | result |\n|---|---|\n| typecheck | ${verdict(gate.typecheck)} |\n| unit | ${verdict(gate.unit)} |\n\n<details><summary>gate log</summary>\n\n\`\`\`\n${(gate.log ?? "").slice(-4000)}\n\`\`\`\n</details>`);
       return;
     }
     if (e2e && e2e.ok === false) {
+      preserve = escalate(p.number, "Feature failed browser verification — not merging.", `\n${e2e.note ?? ""}`, workBranch);
       results.push({ num: p.number, title: p.title, status: "e2e-fail" });
-      escalate(p.number, "Feature failed browser verification — not merging.", `\n${e2e.note ?? ""}`);
       return;
     }
 
-    // ── merge on host ──
-    git(["checkout", BASE_BRANCH]);
-    try { git(["merge", "--no-ff", p.branch, "-m", `AFK: ${p.title} (closes #${p.number})`]); }
-    catch { git(["merge", "--abort"]); results.push({ num: p.number, title: p.title, status: "conflict" }); escalate(p.number, `Merge conflict with \`${BASE_BRANCH}\`. Needs a human to resolve.`); return; }
-    if (PUSH) git(["push", "origin", BASE_BRANCH]);
+    // ── merge on host (serialized: the shared host repo can't take two merges at once) ──
+    let conflict = false;
+    await withGitLock(() => {
+      git(["checkout", BASE_BRANCH]);
+      try { git(["merge", "--no-ff", p.branch, "-m", `AFK: ${p.title} (closes #${p.number})`]); if (PUSH) git(["push", "origin", BASE_BRANCH]); }
+      catch { git(["merge", "--abort"]); conflict = true; }
+    });
+    if (conflict) { preserve = escalate(p.number, `Merge conflict with \`${BASE_BRANCH}\`. Needs a human to resolve.`, "", workBranch); results.push({ num: p.number, title: p.title, status: "conflict" }); return; }
+    merged = true;
 
     // ── report (screenshots + GIF embed INLINE via release assets) ──
     const media = uploadMedia(p.number, afk);
@@ -193,7 +238,8 @@ async function processIssue(p: Picked, results: Result[]): Promise<void> {
     results.push({ num: p.number, title: p.title, status: "merged", media: media.count });
   } finally {
     if (sandbox) await sandbox.close().catch(() => {});
-    try { git(["branch", "-D", p.branch]); } catch { /* may already be gone */ }
+    // delete the branch when work landed on base, or when there's nothing worth keeping.
+    if (merged || !preserve) await withGitLock(() => { try { git(["branch", "-D", p.branch]); } catch { /* gone / checked out */ } });
   }
 }
 
@@ -233,7 +279,7 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
   }
 
   // ── morning roll-up ──
-  const icon: Record<string, string> = { merged: "✅", "gate-fail": "❌", "e2e-fail": "❌", conflict: "⚠️", "no-commits": "∅", "no-gate": "❓", error: "💥" };
+  const icon: Record<string, string> = { merged: "✅", blocked: "🛟", timeout: "⏱️", "gate-fail": "❌", "e2e-fail": "❌", conflict: "⚠️", "no-commits": "∅", "no-gate": "❓", error: "💥" };
   const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status}${r.media ? `  (${r.media} shot${r.media > 1 ? "s" : ""})` : ""}`);
   const merged = results.filter((r) => r.status.startsWith("merged")).length;
   const report = [
