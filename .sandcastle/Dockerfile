@@ -2,8 +2,8 @@
 # Generic across projects — per-project deps install at sandbox start via afk.config.json "setup".
 FROM node:22-bookworm
 
-# System deps (jq is required by afk-gate.sh)
-RUN apt-get update && apt-get install -y git curl jq \
+# System deps: jq (afk-gate.sh), ffmpeg (stitches screenshots into the demo GIF)
+RUN apt-get update && apt-get install -y git curl jq ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (used by skills that read docs/issues if you grant it; not required by the gate)
@@ -18,6 +18,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN npx --yes playwright@1.50 install --with-deps chromium
 
+# expect MCP server (browser-driving + screenshots), installed globally as root.
+RUN npm install -g expect-cli@latest
+
 # Align container user to the host user so bind-mounted files share an owner (sandcastle convention).
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
@@ -28,7 +31,11 @@ USER ${AGENT_UID}:${AGENT_GID}
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/agent/.local/bin:$PATH"
 
-# Skill-pack — the skills the worker self-selects from (see .sandcastle/skills/README.md).
+# Register expect as a user-scope MCP server so the headless worker has mcp__expect__* tools.
+# expect reuses the chromium installed above via PLAYWRIGHT_BROWSERS_PATH.
+RUN printf '{ "mcpServers": { "expect": { "command": "expect-mcp" } } }\n' > /home/agent/.claude.json
+
+# Skill-pack — the skills the worker self-selects from (baked at build by install.mjs).
 COPY --chown=${AGENT_UID}:${AGENT_GID} skills/ /home/agent/.claude/skills/
 
 # Sandcastle bind-mounts the git worktree at /home/agent/workspace and runs there.

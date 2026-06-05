@@ -5,8 +5,8 @@
  *   container (per issue, one agent):  implement → write spec → run afk-gate → write summary
  *
  * The host owns every GitHub mutation and the merge decision. The worker only
- * produces artifacts in the bind-mounted worktree (.afk/gate.json, .afk/summary.md,
- * .afk/video.webm) and commits its code. The worker has no GitHub credentials.
+ * produces artifacts in the bind-mounted worktree (.afk/gate.json, .afk/e2e.json,
+ * .afk/summary.md, .afk/shots/*.png, .afk/demo.gif) and commits its code. No GitHub creds.
  *
  * Run from the project root:  npx tsx .sandcastle/run.ts
  */
@@ -97,19 +97,38 @@ let releaseReady = false;
 function ensureRelease(): void {
   if (releaseReady) return;
   try { gh(["release", "view", RELEASE_TAG]); }
-  catch { gh(["release", "create", RELEASE_TAG, "--title", "AFK artifacts", "--notes", "Auto-generated feature videos.", "--latest=false"]); }
+  catch { gh(["release", "create", RELEASE_TAG, "--title", "AFK artifacts", "--notes", "Auto-generated proof-of-work screenshots.", "--latest=false"]); }
   releaseReady = true;
 }
-function uploadVideo(num: number, videoPath: string): string {
+/** Upload the worker's demo.gif + step screenshots as Release assets and return inline markdown. */
+function uploadMedia(num: number, afkDir: string): { markdown: string; count: number } {
+  const assetUrl = (name: string) => `https://github.com/${NWO}/releases/download/${RELEASE_TAG}/${name}`;
+  const upload = (srcPath: string, assetName: string): string => {
+    const named = path.join(afkDir, assetName);            // gh names the asset by basename
+    if (path.resolve(srcPath) !== path.resolve(named)) fs.copyFileSync(srcPath, named);
+    gh(["release", "upload", RELEASE_TAG, named, "--clobber"]);
+    return assetUrl(assetName);
+  };
+
+  const gif = path.join(afkDir, "demo.gif");
+  const shotsDir = path.join(afkDir, "shots");
+  const shots = fs.existsSync(shotsDir) ? fs.readdirSync(shotsDir).filter((f) => f.endsWith(".png")).sort() : [];
+  if (!fs.existsSync(gif) && shots.length === 0) return { markdown: "", count: 0 };
   ensureRelease();
-  const named = path.join(path.dirname(videoPath), `issue-${num}.webm`);
-  fs.copyFileSync(videoPath, named);
-  gh(["release", "upload", RELEASE_TAG, named, "--clobber"]);
-  return `https://github.com/${NWO}/releases/download/${RELEASE_TAG}/issue-${num}.webm`;
+
+  let md = "";
+  let count = 0;
+  if (fs.existsSync(gif)) { md += `\n\n![demo](${upload(gif, `issue-${num}-demo.gif`)})`; count++; }
+  if (shots.length) {
+    const imgs = shots.map((s) => `![${s}](${upload(path.join(shotsDir, s), `issue-${num}-${s}`)})`).join("\n\n");
+    md += `\n\n<details><summary>Step screenshots (${shots.length})</summary>\n\n${imgs}\n\n</details>`;
+    count += shots.length;
+  }
+  return { markdown: md, count };
 }
 
 // ── per-issue pipeline ───────────────────────────────────────────────────────
-type Result = { num: number; title: string; status: string; video?: string };
+type Result = { num: number; title: string; status: string; media?: number };
 
 async function processIssue(p: Picked, results: Result[]): Promise<void> {
   const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
@@ -137,21 +156,25 @@ async function processIssue(p: Picked, results: Result[]): Promise<void> {
       commits = r.commits.length;
     } finally { clearTimeout(timer); }
 
-    // read the deterministic verdict the afk-gate SCRIPT wrote (not the agent's prose)
+    // host-read artifacts from the bind-mounted worktree
     const afk = path.join(sandbox.worktreePath, ".afk");
-    const gate = readJson(path.join(afk, "gate.json"));
+    const gate = readJson(path.join(afk, "gate.json"));         // {typecheck,unit,log} — written by the SCRIPT
+    const e2e = readJson(path.join(afk, "e2e.json"));           // {ok,note} — worker's browser verdict, or null
     const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
-    const videoPath = path.join(afk, "video.webm");
 
     if (commits === 0) { results.push({ num: p.number, title: p.title, status: "no-commits" }); escalate(p.number, "The worker produced no commits."); return; }
     if (!gate) { results.push({ num: p.number, title: p.title, status: "no-gate" }); escalate(p.number, "No `.afk/gate.json` — the worker never ran `afk-gate`, so nothing is verified."); return; }
 
-    const e2e: string = gate.e2e ?? "skip"; // pass | fail | noboot | skip
-    const green = gate.typecheck === true && gate.unit === true && e2e !== "fail";
-    if (!green) {
+    // hard gate (deterministic): typecheck + unit. soft gate: the worker's browser verdict.
+    if (gate.typecheck !== true || gate.unit !== true) {
       results.push({ num: p.number, title: p.title, status: "gate-fail" });
-      escalate(p.number, "Verification gate failed — not merging.",
-        `\n| check | result |\n|---|---|\n| typecheck | ${verdict(gate.typecheck)} |\n| unit | ${verdict(gate.unit)} |\n| e2e | \`${e2e}\` |\n\n<details><summary>gate log</summary>\n\n\`\`\`\n${(gate.log ?? "").slice(-4000)}\n\`\`\`\n</details>`);
+      escalate(p.number, "Hard gate failed — not merging.",
+        `\n| check | result |\n|---|---|\n| typecheck | ${verdict(gate.typecheck)} |\n| unit | ${verdict(gate.unit)} |\n\n<details><summary>gate log</summary>\n\n\`\`\`\n${(gate.log ?? "").slice(-4000)}\n\`\`\`\n</details>`);
+      return;
+    }
+    if (e2e && e2e.ok === false) {
+      results.push({ num: p.number, title: p.title, status: "e2e-fail" });
+      escalate(p.number, "Feature failed browser verification — not merging.", `\n${e2e.note ?? ""}`);
       return;
     }
 
@@ -161,13 +184,13 @@ async function processIssue(p: Picked, results: Result[]): Promise<void> {
     catch { git(["merge", "--abort"]); results.push({ num: p.number, title: p.title, status: "conflict" }); escalate(p.number, `Merge conflict with \`${BASE_BRANCH}\`. Needs a human to resolve.`); return; }
     if (PUSH) git(["push", "origin", BASE_BRANCH]);
 
-    // ── report ──
-    const video = fs.existsSync(videoPath) ? uploadVideo(p.number, videoPath) : undefined;
-    const vidLine = video ? `\n\n🎥 [Watch the feature in action](${video})` : "";
-    const flag = e2e === "noboot" ? "\n\n🚩 **e2e unverified** — the dev server didn't boot in-container, so only typecheck + unit gated this merge." : "";
-    gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done & merged to \`${BASE_BRANCH}\`.**\n\n${summary}${vidLine}${flag}`]);
+    // ── report (screenshots + GIF embed INLINE via release assets) ──
+    const media = uploadMedia(p.number, afk);
+    const verified = e2e?.ok === true ? "\n\n🔎 Verified in the browser: " + (e2e.note ?? "ok") : "";
+    gh(["issue", "comment", String(p.number), "--body",
+      `> *Posted by AFK.*\n\n✅ **Done & merged to \`${BASE_BRANCH}\`.**\n\n${summary}${verified}${media.markdown}`]);
     gh(["issue", "close", String(p.number)]);
-    results.push({ num: p.number, title: p.title, status: e2e === "noboot" ? "merged-unverified" : "merged", video });
+    results.push({ num: p.number, title: p.title, status: "merged", media: media.count });
   } finally {
     if (sandbox) await sandbox.close().catch(() => {});
     try { git(["branch", "-D", p.branch]); } catch { /* may already be gone */ }
@@ -210,8 +233,8 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
   }
 
   // ── morning roll-up ──
-  const icon: Record<string, string> = { merged: "✅", "merged-unverified": "🚩", "gate-fail": "❌", conflict: "⚠️", "no-commits": "∅", "no-gate": "❓", error: "💥" };
-  const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status}${r.video ? `  ([video](${r.video}))` : ""}`);
+  const icon: Record<string, string> = { merged: "✅", "gate-fail": "❌", "e2e-fail": "❌", conflict: "⚠️", "no-commits": "∅", "no-gate": "❓", error: "💥" };
+  const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status}${r.media ? `  (${r.media} shot${r.media > 1 ? "s" : ""})` : ""}`);
   const merged = results.filter((r) => r.status.startsWith("merged")).length;
   const report = [
     `# AFK run report`,

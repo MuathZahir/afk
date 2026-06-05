@@ -9,8 +9,6 @@
   "setup": "npm ci",
   "typecheck": "npm run typecheck",
   "test": "npm run test",
-  "dev": "npm run dev",
-  "baseUrl": "http://localhost:3000",
 
   "labels": {
     "ready": "ready-for-agent",

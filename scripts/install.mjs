@@ -84,8 +84,8 @@ step("Harness");
 const dstSc = path.join(TARGET, ".sandcastle");
 fs.mkdirSync(path.join(dstSc, "lib"), { recursive: true });
 for (const f of ["run.ts", "implement-prompt.md"]) fs.copyFileSync(path.join(AFK, ".sandcastle", f), path.join(dstSc, f));
-for (const f of ["afk-gate.sh", "playwright.afk.config.ts"]) fs.copyFileSync(path.join(AFK, ".sandcastle", "lib", f), path.join(dstSc, "lib", f));
-ok("copied run.ts, prompt, gate");
+for (const f of ["afk-gate.sh", "make-gif.sh"]) fs.copyFileSync(path.join(AFK, ".sandcastle", "lib", f), path.join(dstSc, "lib", f));
+ok("copied run.ts, prompt, gate, make-gif");
 
 // ── 4. project deps ───────────────────────────────────────────────────────────
 step("Dependencies");
@@ -103,7 +103,6 @@ if (fs.existsSync(cfgPath)) {
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
   const has = (d) => Boolean(deps?.[d]);
   const script = (...names) => { const n = names.find((x) => s[x]); return n ? `npm run ${n}` : ""; };
-  const port = has("next") ? 3000 : has("vite") ? 5173 : has("react-scripts") ? 3000 : 3000;
   const setup = fs.existsSync(path.join(TARGET, "pnpm-lock.yaml")) ? "pnpm i --frozen-lockfile"
     : fs.existsSync(path.join(TARGET, "yarn.lock")) ? "yarn --frozen-lockfile"
     : fs.existsSync(path.join(TARGET, "package-lock.json")) ? "npm ci" : "npm install";
@@ -113,12 +112,10 @@ if (fs.existsSync(cfgPath)) {
     setup,
     typecheck: script("typecheck", "type-check", "tsc") || (has("typescript") ? "npx tsc --noEmit" : ""),
     test: script("test"),
-    dev: script("dev", "start"),
-    baseUrl: `http://localhost:${port}`,
     labels: { ready: "ready-for-agent", human: "ready-for-human" },
   };
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
-  ok(`generated afk.config.json  (typecheck=${q(cfg.typecheck)} test=${q(cfg.test)} dev=${q(cfg.dev)} ${cfg.baseUrl})`);
+  ok(`generated afk.config.json  (typecheck=${q(cfg.typecheck)} test=${q(cfg.test)})`);
   console.log("  → glance at it; auto-detection guesses, it doesn't know your project.");
 }
 
