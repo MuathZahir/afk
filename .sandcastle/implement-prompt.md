@@ -38,7 +38,9 @@ GitHub access, so everything you need is here:
    exactly what the issue asks, no scope creep.
 
 3. **If this issue changes anything a user can see in the browser, verify it live and capture
-   proof.** This is the "watch it in action" artifact attached to the issue.
+   proof.** This is the "watch it in action" artifact attached to the issue. It is **optional
+   evidence**, not the gate — the hard gate (step 7) is typecheck + unit and does NOT need a
+   running app.
    - Start the app yourself — figure out the dev command from `package.json` (e.g. `npm run dev`)
      and run it in the background; note the port.
    - Use the **expect skill** (`mcp__expect__open`, `mcp__expect__playwright`,
@@ -47,9 +49,14 @@ GitHub access, so everything you need is here:
    - At each meaningful step, capture a screenshot and **save it to `.afk/shots/NN-label.png`**
      (zero-padded order, e.g. `01-empty-form.png`, `02-submitted.png`) — copy the file expect
      returns into that path. These become the inline screenshots + GIF on the issue.
-   - When done, write **`.afk/e2e.json`** = `{ "ok": true, "note": "what you verified" }` if the
-     feature meets its acceptance criteria, or `{ "ok": false, "note": "what's wrong" }` if it
-     doesn't. The host treats `ok:false` as a failed gate and routes the issue to a human.
+   - If the feature works, write **`.afk/e2e.json`** = `{ "ok": true, "note": "what you verified" }`.
+     If it's genuinely **broken** (your feature doesn't do what the issue asks), write
+     `{ "ok": false, "note": "what's wrong" }` — the host treats `ok:false` as a failed gate.
+   - **If the dev server won't boot for an ENVIRONMENTAL reason** (missing native binary, infra) —
+     do **NOT** bail and do **NOT** write `e2e.json: ok:false`. Just **skip the screenshots**,
+     note "visual unverified — dev server wouldn't boot (env): <detail>" in `.afk/summary.md`, and
+     carry on to the gate. Green typecheck + unit is enough to merge; the missing screenshot is not
+     a failure of your work.
    - If the issue is backend-only with nothing visual, skip this whole step (no `.afk/e2e.json`).
 
 4. **Self-review** your diff before gating: remove dead code, tighten names, drop redundant
@@ -90,8 +97,14 @@ time and tokens is grinding on infrastructure that isn't your fault. Don't.
   yours to fix.** Quick sanity check: would `git stash` (dropping your changes) make the error go
   away? If yes, it's environmental.
 
-**When it's environmental, bail after AT MOST one or two quick attempts** (a few minutes, not an
-hour). To bail:
+**Scope:** bail is for when the environment blocks the **core work** — you can't install, can't
+typecheck, can't run the unit tests, the repo won't build at all. It is **NOT** for when only the
+**screenshot/dev-server** step is blocked — that path is handled in step 3 (skip the visual, keep
+going; a green typecheck + unit gate still merges). If `afk-gate.sh` (typecheck + unit) can run and
+pass, you are NOT blocked — finish normally.
+
+**When the core work is environmentally blocked, bail after AT MOST one or two quick attempts**
+(a few minutes, not an hour). To bail:
 
 1. Commit whatever real progress you made (specific paths only — never `node_modules`/lockfiles).
 2. Write `.afk/blocked.json`:

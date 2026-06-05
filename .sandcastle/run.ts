@@ -70,6 +70,24 @@ const branchAhead = (branch: string): boolean => {
   try { return Number(git(["rev-list", "--count", `${BASE_BRANCH}..${branch}`]).trim()) > 0; } catch { return false; }
 };
 
+// A killed run leaves dirty worktrees (stale, often unwritable node_modules) that Sandcastle
+// would REUSE — breaking the fresh install. Wipe them so every run starts from a clean checkout.
+// Preserved branches were already pushed to origin, so dropping local copies is safe.
+function cleanStaleWorktrees(): void {
+  try {
+    for (const m of git(["worktree", "list", "--porcelain"]).matchAll(/^worktree (.*afk-issue-\d+.*)$/gim)) {
+      try { git(["worktree", "remove", "--force", m[1].trim()]); } catch { /* keep going */ }
+    }
+    git(["worktree", "prune"]);
+  } catch { /* no worktrees yet */ }
+  try {
+    for (const b of git(["branch", "--list", "afk/*"]).split("\n").map((s) => s.replace("*", "").trim()).filter(Boolean)) {
+      try { git(["branch", "-D", b]); } catch { /* checked out elsewhere */ }
+    }
+  } catch { /* none */ }
+  try { fs.rmSync(".sandcastle/worktrees", { recursive: true, force: true }); } catch { /* gone */ }
+}
+
 // ── deterministic planner ────────────────────────────────────────────────────
 type Issue = { number: number; title: string; body: string };
 type Picked = { number: number; title: string; branch: string };
@@ -259,6 +277,7 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
 // ── main loop ────────────────────────────────────────────────────────────────
 (async () => {
   console.log(`AFK starting on ${NWO} — base=${BASE_BRANCH}, parallel=${MAX_PARALLEL}, cap=${MAX_ISSUES}, push=${PUSH}\n`);
+  cleanStaleWorktrees();
   const results: Result[] = [];
   let stopped = false;
   let processed = 0;
