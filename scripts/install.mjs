@@ -103,9 +103,13 @@ if (fs.existsSync(cfgPath)) {
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
   const has = (d) => Boolean(deps?.[d]);
   const script = (...names) => { const n = names.find((x) => s[x]); return n ? `npm run ${n}` : ""; };
-  const setup = fs.existsSync(path.join(TARGET, "pnpm-lock.yaml")) ? "pnpm i --frozen-lockfile"
-    : fs.existsSync(path.join(TARGET, "yarn.lock")) ? "yarn --frozen-lockfile"
-    : fs.existsSync(path.join(TARGET, "package-lock.json")) ? "npm ci" : "npm install";
+  // The worker installs INSIDE a Linux container. `npm ci` from a host (Windows/macOS)
+  // lockfile skips the container's platform-specific native binaries (npm bug #4828 —
+  // breaks Tailwind v4/lightningcss, swc, esbuild, sharp…). So for npm we regenerate a
+  // Linux install, then restore the tracked lockfile so the worktree stays git-clean.
+  const setup = fs.existsSync(path.join(TARGET, "pnpm-lock.yaml")) ? "pnpm i"
+    : fs.existsSync(path.join(TARGET, "yarn.lock")) ? "yarn"
+    : "rm -f package-lock.json && npm install --no-audit --no-fund && git checkout -- package-lock.json 2>/dev/null; true";
   const base = (() => { try { return shq("git", ["-C", TARGET, "symbolic-ref", "--short", "HEAD"]); } catch { return "main"; } })();
   const cfg = {
     baseBranch: base, push: false, maxParallel: 2, maxIssuesPerRun: 5, issueTimeoutMin: 30, model: "opus",

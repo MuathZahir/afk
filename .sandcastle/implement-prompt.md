@@ -15,6 +15,9 @@ GitHub access, so everything you need is here:
 - Do **not** push, do **not** comment on or close the issue, do **not** touch the remote.
   The host handles merge, asset upload, comment, and close after you finish.
 - The `.afk/` directory is scratch for this run — **never commit it** (it's gitignored).
+- **Never commit `package-lock.json` / lockfile changes or `node_modules`.** The container
+  installs platform-specific binaries; that churn must not reach the branch. Commit only the
+  source changes your issue actually requires (`git add` specific paths, not `git add -A`).
 - When everything below is done, output `<promise>COMPLETE</promise>`.
 
 # SKILLS — use the right one for the job
