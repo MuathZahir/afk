@@ -1,0 +1,14 @@
+node_modules/
+*.log
+
+# secrets + per-project config (these are filled in per project, never committed)
+.sandcastle/.env
+.sandcastle/afk.config.json
+
+# run artifacts
+.afk/
+AFK-REPORT.md
+
+# vendored skill copies (3rd-party / large) — keep only the README
+.sandcastle/skills/*
+!.sandcastle/skills/README.md

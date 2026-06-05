@@ -1,0 +1,19 @@
+{
+  "name": "afk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Drain a GitHub ready-for-agent issue queue with isolated Claude Code workers, on your Claude subscription.",
+  "bin": {
+    "afk-install": "scripts/install.mjs"
+  },
+  "scripts": {
+    "install-into": "node scripts/install.mjs"
+  },
+  "//": "These are the deps the TARGET project needs. install.mjs prints the command to add them.",
+  "peerDependencies": {
+    "@ai-hero/sandcastle": "*",
+    "@playwright/test": "^1.50.0",
+    "tsx": "^4.0.0"
+  }
+}

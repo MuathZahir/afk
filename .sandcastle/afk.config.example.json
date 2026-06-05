@@ -1,0 +1,19 @@
+{
+  "baseBranch": "master",
+  "push": false,
+  "maxParallel": 2,
+  "maxIssuesPerRun": 5,
+  "issueTimeoutMin": 30,
+  "model": "opus",
+
+  "setup": "npm ci",
+  "typecheck": "npm run typecheck",
+  "test": "npm run test",
+  "dev": "npm run dev",
+  "baseUrl": "http://localhost:3000",
+
+  "labels": {
+    "ready": "ready-for-agent",
+    "human": "ready-for-human"
+  }
+}
