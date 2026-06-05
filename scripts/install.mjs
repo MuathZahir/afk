@@ -25,8 +25,10 @@ const SKILLS_SRC = path.join(os.homedir(), ".claude", "skills");
 const IMAGE = "afk-worker";
 const DEFAULT_SKILLS = ["tdd", "find-docs", "diagnose", "web-design-guidelines"];
 
-const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", ...opts });
-const shq = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
+// shell:true on Windows so .cmd shims (npm, npx) spawn without EINVAL (Node 20+).
+const WIN = process.platform === "win32";
+const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", shell: WIN, ...opts });
+const shq = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], shell: WIN, ...opts }).trim();
 const ok = (m) => console.log(`✓ ${m}`);
 const step = (m) => console.log(`\n• ${m}`);
 
@@ -139,6 +141,6 @@ function readEnv(file) {
   }
   return out;
 }
-function npmCmd() { return process.platform === "win32" ? "npm.cmd" : "npm"; }
+function npmCmd() { return "npm"; } // shell:true resolves npm.cmd on Windows
 function argVal(flag) { const i = process.argv.indexOf(flag); return i > -1 ? process.argv[i + 1] : undefined; }
 function q(v) { return v ? `"${v}"` : "∅"; }
