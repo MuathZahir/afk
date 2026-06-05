@@ -86,6 +86,13 @@ function cleanStaleWorktrees(): void {
     }
   } catch { /* none */ }
   try { fs.rmSync(".sandcastle/worktrees", { recursive: true, force: true }); } catch { /* gone */ }
+  // reap orphaned worker containers left by a previous killed/errored run (close() never ran).
+  // Safe at startup: this run hasn't created any containers yet.
+  try {
+    const ids = execFileSync("docker", ["ps", "-aq", "--filter", `ancestor=${WORKER_IMAGE}`], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+    for (const id of ids) { try { execFileSync("docker", ["rm", "-f", id], { stdio: "ignore" }); } catch { /* keep going */ } }
+    if (ids.length) console.log(`Reaped ${ids.length} orphaned worker container(s) from a prior run.`);
+  } catch { /* docker not running — createSandbox will surface it */ }
 }
 
 // ── deterministic planner ────────────────────────────────────────────────────
