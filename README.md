@@ -56,40 +56,29 @@ Design choices that make it lean and safe — and why:
 
 ---
 
-## One-time setup
+## Setup — one command
 
-1. `claude setup-token` (needs Pro/Max) — this is how workers bill to your subscription.
-2. Make sure Docker is running and `gh auth status` is logged in.
-
-## Add to a project
+Prereqs: Docker running, `gh auth` logged in, and `claude setup-token` run once (Pro/Max).
 
 ```bash
-node <path-to-afk>/scripts/install.mjs <path-to-your-project>
+# set the token once (any of these — the installer picks it up and saves it globally):
+setx CLAUDE_CODE_OAUTH_TOKEN <token-from-claude-setup-token>
+
+# then, in (or pointing at) any project:
+node <path-to-afk>/scripts/install.mjs .
 ```
 
-Then in that project:
+That single command does **everything**:
 
-1. `npm i -D @ai-hero/sandcastle @playwright/test tsx`
-2. Paste your token into `.sandcastle/.env`
-3. Edit `.sandcastle/afk.config.json` — the only project-specific part:
+- saves your token to `~/.afk/.env` — set once, reused by every project after this
+- builds the shared `afk-worker` image with your skills baked in (once; skipped if it exists)
+- installs `@ai-hero/sandcastle @playwright/test tsx` in the project
+- **auto-generates** `.sandcastle/afk.config.json` from the project's `package.json`
+  (detects `typecheck` / `test` / `dev` / port / base branch / package manager)
+- copies the harness in and updates `.gitignore`
 
-   ```jsonc
-   {
-     "baseBranch": "master",
-     "push": false,            // merges stay local; review `git log` then `git push`
-     "maxParallel": 2,         // keep low on a subscription (rate windows)
-     "maxIssuesPerRun": 5,
-     "issueTimeoutMin": 30,
-     "model": "opus",
-     "setup": "npm ci",        // runs once per sandbox before the agent
-     "typecheck": "npm run typecheck",
-     "test": "npm run test",
-     "dev": "npm run dev",     // Playwright boots this for e2e/video
-     "baseUrl": "http://localhost:3000"
-   }
-   ```
-
-4. Vendor the worker's skills into `.sandcastle/skills/` (see its `README.md`).
+Glance at the generated `afk.config.json` — detection guesses; fix `dev`/`baseUrl` if it's wrong.
+Re-run with `--rebuild` to refresh the baked skills, or `--skills tdd,find-docs,...` to choose them.
 
 ## Run
 
@@ -105,8 +94,9 @@ In the morning: read `AFK-REPORT.md`, watch any videos, `git push` what you like
 
 These are the spots to watch the very first time — they depend on your project + host:
 
-- [ ] **Image builds.** `docker build .sandcastle` — Playwright `--with-deps` + the user-id
-      alignment are the likely friction points. Tune the `Dockerfile` if it fails.
+- [ ] **Image builds.** The installer runs `docker build` for `afk-worker` — Playwright
+      `--with-deps` + user-id alignment are the likely friction points. Tune `.sandcastle/Dockerfile`
+      and re-run the installer with `--rebuild` if it fails.
 - [ ] **`setup` is enough.** `npm ci` must produce a runnable app in-container. Monorepos may
       need a workspace-aware install or a build step.
 - [ ] **Dev server binds inside the container** at `baseUrl` (use `0.0.0.0`, not `localhost`-only,

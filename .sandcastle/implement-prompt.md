@@ -21,8 +21,10 @@ GitHub access, so everything you need is here:
 
 - **tdd** — always, for the implementation. Red → green → refactor.
 - **find-docs** (context7) — whenever you touch a library/SDK/API you're not 100% current on. Don't guess API shapes.
-- **frontend-design** — any UI/visual change. Match the existing design system.
+- **web-design-guidelines** — any UI/visual change. Match the existing design system; keep it accessible.
 - **diagnose** — if the issue is a bug, reproduce it first before fixing.
+
+(Any other skill installed in the image is fair game — use what the task needs.)
 
 # STEPS
 

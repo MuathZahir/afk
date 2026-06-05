@@ -12,13 +12,16 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 // ── config + env ────────────────────────────────────────────────────────────
 const CFG = JSON.parse(fs.readFileSync(".sandcastle/afk.config.json", "utf8"));
-loadDotenv(".sandcastle/.env");
+loadDotenv(".sandcastle/.env");                          // optional per-project override
+loadDotenv(path.join(os.homedir(), ".afk", ".env"));     // global token (set once by install)
+const WORKER_IMAGE = "afk-worker";                       // shared image, built once
 
 const BASE_BRANCH: string = CFG.baseBranch ?? "master";
 const MAX_PARALLEL: number = CFG.maxParallel ?? 2;
@@ -113,7 +116,7 @@ async function processIssue(p: Picked, results: Result[]): Promise<void> {
   let sandbox: sandcastle.Sandbox | undefined;
   try {
     sandbox = await sandcastle.createSandbox({
-      sandbox: docker(),
+      sandbox: docker({ imageName: WORKER_IMAGE }),
       branch: p.branch,
       baseBranch: BASE_BRANCH,
       hooks: { sandbox: { onSandboxReady: [{ command: CFG.setup ?? "npm ci" }] } },
