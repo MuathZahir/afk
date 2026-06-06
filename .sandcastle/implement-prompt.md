@@ -24,12 +24,18 @@ GitHub access, so everything you need is here:
 
 - **tdd** — always, for the implementation. Red → green → refactor.
 - **find-docs** (context7) — whenever you touch a library/SDK/API you're not 100% current on. Don't guess API shapes.
-- **web-design-guidelines** — any UI/visual change. Match the existing design system; keep it accessible.
+- **frontend-design** — any UI/visual change. Match the existing design system; keep it accessible.
 - **diagnose** — if the issue is a bug, reproduce it first before fixing.
 
 (Any other skill installed in the image is fair game — use what the task needs.)
 
 # STEPS
+
+> **Ordering is deliberate: TEST and COMMIT come BEFORE the optional screenshots.** The host merges
+> any branch you commit to — so committing is the only thing that makes your work land. Screenshots
+> are nice-to-have evidence with *zero* effect on the merge. Do the merge-critical steps first so
+> that even if the screenshot step explodes (missing browser, GPU-less renderer, timeout), your work
+> still lands. **An agent that chases screenshots before committing throws away everything it built.**
 
 1. **Explore** the repo to understand the code paths this issue touches. Read the relevant
    tests and the surrounding modules. Use the project's own conventions.
@@ -37,52 +43,71 @@ GitHub access, so everything you need is here:
 2. **Implement** the acceptance criteria using **tdd**. Keep the change a thin vertical slice —
    exactly what the issue asks, no scope creep.
 
-3. **If this issue changes anything a user can see in the browser, verify it live and capture
-   proof.** This is the "watch it in action" artifact attached to the issue. It is **optional
-   evidence**, not the gate — the hard gate (step 7) is typecheck + unit and does NOT need a
-   running app.
-   - Start the app yourself — figure out the dev command from `package.json` (e.g. `npm run dev`)
-     and run it in the background; note the port.
-   - Use the **expect skill** (`mcp__expect__open`, `mcp__expect__playwright`,
-     `mcp__expect__screenshot`) to open the app and step through the issue's acceptance criteria
-     like a user would.
-   - At each meaningful step, capture a screenshot and **save it to `.afk/shots/NN-label.png`**
-     (zero-padded order, e.g. `01-empty-form.png`, `02-submitted.png`) — copy the file expect
-     returns into that path. These become the inline screenshots + GIF on the issue.
-   - If the feature works, write **`.afk/e2e.json`** = `{ "ok": true, "note": "what you verified" }`.
-     If it's genuinely **broken** (your feature doesn't do what the issue asks), write
-     `{ "ok": false, "note": "what's wrong" }` — the host treats `ok:false` as a failed gate.
-   - **If the dev server won't boot for an ENVIRONMENTAL reason** (missing native binary, infra) —
-     do **NOT** bail and do **NOT** write `e2e.json: ok:false`. Just **skip the screenshots**,
-     note "visual unverified — dev server wouldn't boot (env): <detail>" in `.afk/summary.md`, and
-     carry on to the gate. Green typecheck + unit is enough to merge; the missing screenshot is not
-     a failure of your work.
-   - If the issue is backend-only with nothing visual, skip this whole step (no `.afk/e2e.json`).
+3. **Self-review** your diff: remove dead code, tighten names, drop redundant comments, make sure
+   you didn't break adjacent behavior. Preserve functionality.
 
-4. **Self-review** your diff before gating: remove dead code, tighten names, drop redundant
-   comments, make sure you didn't break adjacent behavior. Preserve functionality.
+   **Typecheck YOUR code only — do NOT touch the baseline.** This monorepo has a KNOWN
+   pre-existing red full-typecheck baseline (drizzle dual-package skew in `api_v2`, stale Next
+   route codegen, etc.) — it is red on a clean checkout of the base branch, before you change
+   anything. It is **not yours to fix**. So:
+   - ✅ Do typecheck the package/app you changed, scoped and fast (e.g. `cd packages/api_v2 && npx
+     tsc --noEmit` or `npx tsc -p apps/web_v2/tsconfig.json`) and make sure **your** files are clean.
+   - ❌ Do **NOT** run the full-monorepo typecheck / `npm run check-types`. Do **NOT** `git stash`
+     and re-count total errors to "prove" they're pre-existing. Do **NOT** try to fix baseline
+     errors in files you didn't touch. That is exactly the time-and-token sink to avoid — the gate
+     does not check the full typecheck, so neither should you.
 
-5. **Write `.afk/summary.md`** — 4–8 lines for a human who will NOT read the code:
+4. **Write `.afk/summary.md`** — 4–8 lines for a human who will NOT read the code:
    what you built, key decisions/trade-offs, and the files you touched.
 
-6. **Stitch the demo GIF** (only if you captured screenshots):
+5. **Self-check YOUR OWN tests, then COMMIT.** Run only the tests you wrote or that cover your
+   change — scoped and fast (e.g. `node --test --import tsx path/to/your.test.ts`, or your
+   package's `npm test` if it's quick). Make them green. **Do NOT run `.sandcastle/lib/afk-gate.sh`
+   yourself** — the **host runs the authoritative full gate after you finish**. The full suite takes
+   minutes; if you run it, the harness auto-backgrounds it and your run ends before it completes —
+   pure waste. Your job is just to make sure *your* code's tests pass.
 
-   ```
-   bash .sandcastle/lib/make-gif.sh
-   ```
+6. **Commit** your code changes with a clear message — specific paths only, **never** `.afk/`,
+   `node_modules`, or lockfiles. **Commit the moment your own tests pass — this is the most
+   important step; never end your turn with uncommitted work.** The host gates and merges from your
+   commit; uncommitted work cannot be merged.
 
-7. **Run the hard gate — do not skip and do not fake it:**
+7. **OPTIONAL — live proof, STRICTLY time-boxed.** Only if the issue changes something a user can
+   see, and only after steps 5–6 are done. This is bonus evidence, **not** the gate.
+   - **Hard cap: ONE attempt, ≤2 minutes total. The moment anything environmental gets in the way —
+     dev server won't boot, browser/native binary missing, GPU/WebGL/renderer errors, a download
+     that stalls — STOP immediately, skip the rest, and go to step 8.** Do **not** retry, do **not**
+     reinstall browsers, do **not** hand-launch chrome with workaround flags. Note
+     `visual unverified (env): <one line>` in `.afk/summary.md` and move on. Your gated+committed
+     work is complete regardless. Grinding here is the #1 way agents waste their whole budget.
+   - Start the app from `package.json` (e.g. `npm run dev`) in the background; note the port.
+   - Use the **expect skill** (`mcp__expect__open`, `mcp__expect__playwright`,
+     `mcp__expect__screenshot`) to step through the acceptance criteria like a user. Save each
+     screenshot to `.afk/shots/NN-label.png` (zero-padded, e.g. `01-empty-form.png`).
+   - If you captured shots, stitch the GIF: `bash .sandcastle/lib/make-gif.sh`.
+   - Write **`.afk/e2e.json`**: `{ "ok": true, "note": "what you verified" }` if it works. Only
+     write `{ "ok": false, "note": "..." }` if **your feature is genuinely broken** (not if the
+     environment merely blocked you — an env block means SKIP, leave no `e2e.json`). The host treats
+     `ok:false` as a failed gate, so never use it for environmental problems.
+   - Backend-only / nothing visual → skip this whole step (no `.afk/e2e.json`).
 
-   ```
-   bash .sandcastle/lib/afk-gate.sh
-   ```
+8. Output `<promise>COMPLETE</promise>`.
 
-   This runs typecheck + unit tests and writes `.afk/gate.json`. **Never edit `.afk/gate.json`
-   yourself** — the host reads it as the source of truth and refuses to merge if it's red or
-   missing. If it's red, fix the real problem and re-run until green.
+# KEEP YOUR CHECKS SMALL AND IN THE FOREGROUND — NEVER POLL IN THE BACKGROUND
 
-8. **Commit** your code changes with a clear message (do NOT commit `.afk/`). Then output
-   `<promise>COMPLETE</promise>`.
+The single most common way a worker throws away good work: it launches a **slow** command (the full
+test suite) as a **background** job, then burns its entire turn budget polling with `sleep` or
+`until grep ... /tmp/*.out` loops — and the run ends BEFORE it commits. The work is done but
+uncommitted, and **uncommitted work is lost.** This is why **you don't run the full gate** — the
+host does (see step 5).
+
+- Run only **your own, scoped, fast** tests — synchronously, in the foreground, with a `timeout`.
+  Wait for them to return; read the output directly.
+- Do **NOT** start anything as a background task and poll a `/tmp/*.out` file. Do **NOT** `sleep` in
+  a loop. Do **NOT** run the full `npm run test --workspaces` — nobody needs it; just your scoped tests.
+- **Commit the instant your own tests pass (step 6) — before any optional/visual work.** Never end
+  your turn with uncommitted changes. A committed imperfect change survives; an uncommitted perfect
+  one does not.
 
 # BAIL FAST ON ENVIRONMENT PROBLEMS — DO NOT RABBIT-HOLE
 
@@ -97,11 +122,10 @@ time and tokens is grinding on infrastructure that isn't your fault. Don't.
   yours to fix.** Quick sanity check: would `git stash` (dropping your changes) make the error go
   away? If yes, it's environmental.
 
-**Scope:** bail is for when the environment blocks the **core work** — you can't install, can't
-typecheck, can't run the unit tests, the repo won't build at all. It is **NOT** for when only the
-**screenshot/dev-server** step is blocked — that path is handled in step 3 (skip the visual, keep
-going; a green typecheck + unit gate still merges). If `afk-gate.sh` (typecheck + unit) can run and
-pass, you are NOT blocked — finish normally.
+**Scope:** bail is for when the environment blocks the **core work** — you can't install, can't run
+your tests, the repo won't build at all. It is **NOT** for when only the **screenshot/dev-server**
+step is blocked — that path is handled in step 7 (skip the visual, keep going). If you can run your
+own tests and they pass, you are NOT blocked — commit and finish normally.
 
 **When the core work is environmentally blocked, bail after AT MOST one or two quick attempts**
 (a few minutes, not an hour). To bail:
@@ -121,7 +145,7 @@ eventually works.
 
 # IF YOU'RE STUCK ON YOUR OWN CODE
 
-If the failure *is* yours but you can't get the gate green (genuinely hard, underspecified issue),
-still run `afk-gate.sh` so the host sees the real red verdict, write what blocked you into
-`.afk/summary.md`, commit what you have, and output `<promise>COMPLETE</promise>`. The host routes
-it to a human — a fine outcome, far better than faking green.
+If the bug *is* yours but you genuinely can't get your tests green (hard or underspecified issue),
+write what blocked you into `.afk/summary.md` **and `.afk/blocked.json`** (so the host routes it to
+a human instead of merging it), commit what you have, and output `<promise>COMPLETE</promise>`. That
+is a fine outcome — far better than committing code you know is broken as if it were done.

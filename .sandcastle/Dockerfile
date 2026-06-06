@@ -6,7 +6,7 @@ FROM node:22-bookworm
 RUN apt-get update && apt-get install -y git curl jq ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI (used by skills that read docs/issues if you grant it; not required by the gate)
+# GitHub CLI (used by skills that read docs/issues if you grant it)
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -35,7 +35,7 @@ ENV PATH="/home/agent/.local/bin:$PATH"
 # expect reuses the chromium installed above via PLAYWRIGHT_BROWSERS_PATH.
 RUN printf '{ "mcpServers": { "expect": { "command": "expect-mcp" } } }\n' > /home/agent/.claude.json
 
-# Skill-pack — the skills the worker self-selects from (baked at build by install.mjs).
+# Skill-pack — the skills the worker self-selects from (baked at build by `afk init`).
 COPY --chown=${AGENT_UID}:${AGENT_GID} skills/ /home/agent/.claude/skills/
 
 # Sandcastle bind-mounts the git worktree at /home/agent/workspace and runs there.

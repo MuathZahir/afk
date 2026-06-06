@@ -1,60 +1,60 @@
 # AFK
 
 Drain a GitHub `ready-for-agent` issue queue while you sleep. Isolated Claude Code workers
-implement each issue in a Docker sandbox, a deterministic script gates and merges the work, and
-each issue gets a summary comment + inline screenshots/GIF of the feature running. Runs on your **Claude
-subscription** (no API key). Drop-in to any GitHub repo.
+implement each issue in a Docker sandbox; **each milestone becomes one feature branch with one
+PR** for you to test and merge. Runs on your **Claude subscription** (no API key). Drop-in to any
+GitHub repo.
 
 ```
-/grill-me   →   /to-issues   →   npx tsx .sandcastle/run.ts
- design          publish              agents work; you wake to merged
-                 ready-for-agent      commits + per-issue summaries & screenshots
+afk init  →  /grill-with-docs  →  /to-issues  →  afk run  →  review the feature PRs  →  merge
+ setup        design             publish          agents work       test on the branch
+              (milestone =        ready-for-agent  → feat/<slug> +
+               one feature)       issues           one PR per feature
 ```
 
-Built on [Sandcastle](https://github.com/mattpocock/sandcastle) (the isolation/worktree/merge
-engine) and the [Matt Pocock skills](https://github.com/mattpocock) (`to-issues`, `triage`,
-`tdd`, `find-docs`, …). AFK is the thin autonomous layer on top — it lives entirely in
-`.sandcastle/`; there is no new engine and no CLI to maintain.
+Built on **[Sandcastle](https://github.com/mattpocock/sandcastle)** (the isolation / worktree /
+merge engine — used as a library, not forked) and the **[Matt Pocock skills](https://github.com/mattpocock)**
+(`to-issues`, `triage`, `tdd`, `find-docs`, …). AFK is the thin autonomous layer on top: a small
+CLI that orchestrates the queue, routes work to feature branches, and opens PRs.
 
 ---
 
 ## How it works
 
 ```
-HOST (deterministic TypeScript — no LLM)        CONTAINER (one agent per issue)
-────────────────────────────────────────        ──────────────────────────────────
+HOST (deterministic TypeScript — no LLM)          CONTAINER (one agent per issue)
+──────────────────────────────────────────        ──────────────────────────────────
 plan:   gh issue list --label ready-for-agent
-        parse "Blocked by #N", skip if open
+        group by milestone → feat/<slug>
         ↓ (up to maxParallel at once)
-        createSandbox(branch afk/issue-N) ──────▶ implement (tdd)
-                                                   verify in browser via expect skill,
-                                                     screenshots → .afk/shots/*.png,
-                                                     verdict → .afk/e2e.json
-                                                   self-review + .afk/summary.md
-                                                   make-gif.sh + afk-gate.sh ─┐
-        read .afk/gate.json + e2e.json  ◀──────────────────────────────────  ┘ SCRIPT writes verdict
-        typecheck+unit green AND browser ok?
-          ├─ yes → git merge → upload GIF+shots to a Release → comment (inline) + close
-          └─ no  → drop branch → comment diagnostics → relabel ready-for-human
-        ↓ re-query (a closed issue can unblock its dependents this run)
-report: AFK-REPORT.md
+        createSandbox(branch afk/issue-N,
+                      baseBranch feat/<slug>) ────▶ implement (tdd)
+                                                     run the tests covering the change
+                                                     (frontend-design for UI, expect for
+                                                      browser proof, find-docs for APIs)
+                                                     commit · write .afk/summary.md
+        merge afk/issue-N → feat/<slug>  ◀────────  (agent commits; host trusts + merges)
+        ↓ when the milestone is done
+        gh pr create feat/<slug> → base  (one PR per feature, Closes #…)
+report: AFK-REPORT.md  (+ `afk changelog` at release time)
 ```
 
 Design choices that make it lean and safe — and why:
 
-- **No planner/merger/reviewer agents.** Planning and merging are deterministic TS; review is
-  folded into the worker. ~60% fewer agent calls than a naive loop → your Max quota lasts.
-- **The hard gate is a script, not the model's opinion.** `afk-gate.sh` runs typecheck + unit and
-  writes `.afk/gate.json` from real exit codes. The host refuses to merge unless that file is
-  green. Defeats "the agent thinks the tests pass."
-- **Visual proof comes from the agent driving the browser** with the **expect** skill — it steps
-  through the acceptance criteria, screenshots each moment, and writes an `ok/not-ok` verdict
-  (`.afk/e2e.json`). `not-ok` blocks the merge; the screenshots + a stitched GIF embed **inline**
-  in the issue comment so you see the feature without clicking.
-- **The worker has no GitHub token.** The issue is injected into its prompt; every GitHub
-  mutation (merge, comment, close, asset upload) happens on the host. Smaller blast radius.
+- **No host gate.** The agent runs the tests covering *its* change and commits only when they
+  pass; the host trusts that committed branch and merges it. Your safety net is reviewing the
+  **feature PR** before you merge it — not a brittle re-run of the whole suite on the host. (A host
+  gate that re-ran the suite was the single biggest source of failed-to-merge runs: it inherited
+  the repo's red-test baseline and got auto-backgrounded mid-run. Removing it fixed both.)
+- **One milestone = one feature = one branch = one PR.** Master stays clean; you check out a
+  feature branch, test the whole thing, and merge its PR when happy. Issues with no milestone fall
+  back to merging straight to the base branch.
+- **The worker has no GitHub token.** The issue is injected into its prompt; every GitHub mutation
+  (merge, comment, close, PR, asset upload) happens on the host. Smaller blast radius.
 - **Failures route to humans, not retries.** A stuck issue gets `ready-for-human` and is skipped
   thereafter, so it never silently burns quota in a loop. Sweep them with `/triage`.
+- **No lost work.** If a worker finishes (or times out) without committing, the host commits its
+  uncommitted source changes so nothing is thrown away, and routes it to a human.
 
 ---
 
@@ -63,59 +63,71 @@ Design choices that make it lean and safe — and why:
 Prereqs: Docker running, `gh auth` logged in, and `claude setup-token` run once (Pro/Max).
 
 ```bash
-# set the token once (any of these — the installer picks it up and saves it globally):
+# install the CLI once (from this repo):
+npm install && npm link        # provides the global `afk` command
+
+# set the token once (the installer picks it up and saves it to ~/.afk/.env):
 setx CLAUDE_CODE_OAUTH_TOKEN <token-from-claude-setup-token>
 
-# then, in (or pointing at) any project:
-node <path-to-afk>/scripts/install.mjs .
+# then, in any project:
+afk init
 ```
 
-That single command does **everything**:
+`afk init` does **everything**: saves your token to `~/.afk/.env` (reused by every project),
+builds the shared `afk-worker` image with your skills baked in (once; `--rebuild` to refresh),
+copies the per-project harness (`implement-prompt.md`, `Dockerfile`) into `.sandcastle/`,
+auto-generates `.sandcastle/afk.config.json`, and updates `.gitignore`. The orchestrator itself is
+**not** copied — it lives in the `afk` package and runs via `afk run`.
 
-- saves your token to `~/.afk/.env` — set once, reused by every project after this
-- builds the shared `afk-worker` image with your skills baked in (once; skipped if it exists)
-- installs `@ai-hero/sandcastle @playwright/test tsx` in the project
-- **auto-generates** `.sandcastle/afk.config.json` from the project's `package.json`
-  (detects `typecheck` / `test` / `dev` / port / base branch / package manager)
-- copies the harness in and updates `.gitignore`
+Baked skills (default): `tdd`, `find-docs`, `diagnose`, `frontend-design`. Choose your own with
+`afk init --skills tdd,find-docs,frontend-design,…`. `expect` (browser proof) is an MCP server set
+up in the Dockerfile, not a baked skill.
 
-Glance at the generated `afk.config.json` — detection guesses your `typecheck`/`test` commands.
-(No `dev`/`baseUrl` needed — the worker drives the browser itself via the expect skill.)
-Re-run with `--rebuild` to refresh the baked skills, or `--skills tdd,find-docs,...` to choose them.
-
-## Run
+## Use
 
 ```bash
-npx tsx .sandcastle/run.ts        # or the /afk skill
+# 1. design + publish issues (standard Matt Pocock skills — AFK doesn't modify them)
+/grill-with-docs
+/to-issues
+
+# 2. group the issues into a feature — create a milestone and assign them (standard GitHub):
+gh api repos/:owner/:repo/milestones -f title="Roleplay history"
+gh issue edit 12 13 14 --milestone "Roleplay history"
+
+# 3. let the agents work
+afk run
 ```
 
-In the morning: read `AFK-REPORT.md`, glance at the inline screenshots on each closed issue,
-`git push` what you like, `/triage` the rest.
+In the morning: read `AFK-REPORT.md`, **check out each feature branch and test it**, then merge its
+PR. `/triage` the `ready-for-human` pile. At release time, `afk changelog --release v1.3.0`.
 
----
+> Milestones are how AFK groups issues into features — assign one per feature. This uses only
+> stock GitHub + skills, so the workflow stays portable and shareable.
 
-## First-run checklist (can't be tested without Docker + a real queue)
+## Commands
 
-These are the spots to watch the very first time — they depend on your project + host:
+| Command | What |
+| ------- | ---- |
+| `afk init [project]` | Set up AFK: token · worker image · skills · config |
+| `afk run` | Drain the queue; one milestone → one feature branch + PR |
+| `afk changelog [--from <ref>] [--write] [--release <tag>]` | Conventional-Commit release notes since the last tag |
 
-- [ ] **Image builds.** The installer runs `docker build` for `afk-worker` — Playwright
-      `--with-deps` + user-id alignment are the likely friction points. Tune `.sandcastle/Dockerfile`
-      and re-run the installer with `--rebuild` if it fails.
-- [ ] **`setup` is enough.** `npm ci` must produce a runnable app in-container. Monorepos may
-      need a workspace-aware install or a build step.
-- [ ] **expect works headless in the container.** The highest-risk piece: the `expect-mcp`
-      server must launch and find chromium (`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`). If the
-      worker can't drive the browser, fall back to the bundled `agent-browser` CLI skill. Test
-      on a UI issue first.
-- [ ] **Merge/branch lifecycle.** Start with `maxIssuesPerRun: 1` and one simple issue; confirm
-      it merges to local `baseBranch` and the `afk/issue-N` branch is cleaned up.
-- [ ] **Cross-platform deps.** On a Windows host, deps install *inside* the Linux container
-      (`setup`), never copied from the host — keep it that way.
+## Config (`.sandcastle/afk.config.json`)
 
-## Known limitations (v1)
+| Key | Default | Notes |
+| --- | --- | --- |
+| `baseBranch` | current branch | PRs target this branch |
+| `maxParallel` | `2` | concurrent workers (respects subscription rate windows) |
+| `maxIssuesPerRun` | `5` | cap per `afk run` |
+| `issueTimeoutMin` | `30` | per-issue wall-clock budget |
+| `model` | `opus` | agent model |
+| `setup` | auto-detected | install command run **inside** the Linux container |
+| `labels` | `ready-for-agent` / `ready-for-human` | queue + escalation labels |
 
-- Serial-ish by design (`maxParallel: 2`) to respect subscription rate windows. Bump it (and
-  switch to an API key) only once the single-worker path is proven.
-- Merge conflicts aren't auto-resolved — they route to `ready-for-human`. Independent vertical
-  slices (what `to-issues` produces) make these rare.
-- `push: false` by default. AFK never force-pushes and never touches remote history.
+## Known limitations
+
+- Serial-ish by design (`maxParallel: 2`) to respect subscription rate windows.
+- Merge conflicts within a feature branch route to `ready-for-human`. Independent vertical slices
+  (what `to-issues` produces) make these rare.
+- AFK pushes **feature branches** and opens PRs, but never pushes or force-pushes the base branch —
+  you merge the PRs yourself.

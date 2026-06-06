@@ -1,17 +1,9 @@
 {
-  "baseBranch": "master",
-  "push": false,
+  "baseBranch": "main",
   "maxParallel": 2,
   "maxIssuesPerRun": 5,
   "issueTimeoutMin": 30,
   "model": "opus",
-
-  "setup": "npm ci",
-  "typecheck": "npm run typecheck",
-  "test": "npm run test",
-
-  "labels": {
-    "ready": "ready-for-agent",
-    "human": "ready-for-human"
-  }
+  "setup": "rm -f package-lock.json && npm install --no-audit --no-fund && git checkout -- package-lock.json 2>/dev/null; true",
+  "labels": { "ready": "ready-for-agent", "human": "ready-for-human" }
 }
