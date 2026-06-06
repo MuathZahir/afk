@@ -10,5 +10,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": [".sandcastle/**/*.ts", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "bin/**/*.mjs"]
 }
