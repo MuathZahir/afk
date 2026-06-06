@@ -320,11 +320,18 @@ async function processIssue(p: Picked, results: Result[], features: Map<string, 
     const where = p.feature === BASE_BRANCH ? `\`${BASE_BRANCH}\`` : `\`${p.feature}\` (feature branch)`;
     gh(["issue", "comment", String(p.number), "--body",
       `> *Posted by AFK.*\n\n✅ **Done — landed on ${where}.**\n\n${summary}${verified}${media.markdown}`]);
+    try { gh(["issue", "edit", String(p.number), "--remove-label", L_READY]); } catch { /* label may not exist */ }
     gh(["issue", "close", String(p.number)]);
     results.push({ num: p.number, title: p.title, status: "merged", feature: p.feature, media: media.count });
   } finally {
+    const wt = sandbox?.worktreePath;
     if (sandbox) await sandbox.close().catch(() => {});
-    if (landed || !preserve) await withGitLock(() => { try { git(["branch", "-D", p.branch]); } catch { /* gone */ } });
+    if (landed || !preserve) await withGitLock(() => {
+      // close() preserves a worktree that looks dirty (untracked .afk/ scratch), which leaves the
+      // issue branch checked out so `branch -D` fails. Force-remove the worktree first.
+      if (wt) { try { git(["worktree", "remove", "--force", wt]); } catch { /* already gone */ } }
+      try { git(["branch", "-D", p.branch]); } catch { /* gone / checked out */ }
+    });
   }
 }
 
