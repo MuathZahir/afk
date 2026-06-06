@@ -46,49 +46,48 @@ GitHub access, so everything you need is here:
 3. **Self-review** your diff: remove dead code, tighten names, drop redundant comments, make sure
    you didn't break adjacent behavior. Preserve functionality.
 
-   **Typecheck YOUR code only — do NOT touch the baseline.** This monorepo has a KNOWN
-   pre-existing red full-typecheck baseline (drizzle dual-package skew in `api_v2`, stale Next
-   route codegen, etc.) — it is red on a clean checkout of the base branch, before you change
-   anything. It is **not yours to fix**. So:
-   - ✅ Do typecheck the package/app you changed, scoped and fast (e.g. `cd packages/api_v2 && npx
-     tsc --noEmit` or `npx tsc -p apps/web_v2/tsconfig.json`) and make sure **your** files are clean.
-   - ❌ Do **NOT** run the full-monorepo typecheck / `npm run check-types`. Do **NOT** `git stash`
-     and re-count total errors to "prove" they're pre-existing. Do **NOT** try to fix baseline
-     errors in files you didn't touch. That is exactly the time-and-token sink to avoid — the gate
-     does not check the full typecheck, so neither should you.
+   **Typecheck YOUR code only — do NOT touch the baseline.** Many repos have a pre-existing red
+   full-typecheck baseline (unrelated errors that are red on a clean checkout of the base branch,
+   before you change anything). That baseline is **not yours to fix**. So:
+   - ✅ Do typecheck the package/app you changed, scoped and fast (e.g. `cd <your-package> && npx
+     tsc --noEmit`, or `npx tsc -p <your-app>/tsconfig.json`) and make sure **your** files are clean.
+   - ❌ Do **NOT** run the full-monorepo typecheck. Do **NOT** `git stash` and re-count total errors
+     to "prove" they're pre-existing. Do **NOT** fix baseline errors in files you didn't touch.
+     Nothing re-runs the full typecheck after you, so don't sink time into the baseline.
 
 4. **Write `.afk/summary.md`** — 4–8 lines for a human who will NOT read the code:
    what you built, key decisions/trade-offs, and the files you touched.
 
 5. **Self-check YOUR OWN tests, then COMMIT.** Run only the tests you wrote or that cover your
    change — scoped and fast (e.g. `node --test --import tsx path/to/your.test.ts`, or your
-   package's `npm test` if it's quick). Make them green. **Do NOT run `.sandcastle/lib/afk-gate.sh`
-   yourself** — the **host runs the authoritative full gate after you finish**. The full suite takes
-   minutes; if you run it, the harness auto-backgrounds it and your run ends before it completes —
-   pure waste. Your job is just to make sure *your* code's tests pass.
+   package's `npm test` if it's quick). Make them green. **There is no host gate** — the branch you
+   commit is merged into the feature branch as-is, and the only check after you is a human reviewing
+   the feature PR. So *your own tests are the safety net*: make your change genuinely work. **Do NOT
+   run the full `npm run test --workspaces` suite** — it's slow and inherits the repo's pre-existing
+   red baseline; just run your own scoped tests.
 
 6. **Commit** your code changes with a clear message — specific paths only, **never** `.afk/`,
-   `node_modules`, or lockfiles. **Commit the moment your own tests pass — this is the most
-   important step; never end your turn with uncommitted work.** The host gates and merges from your
-   commit; uncommitted work cannot be merged.
+   `node_modules`, or lockfiles. Prefer a Conventional-Commit subject (`feat(scope): …`,
+   `fix(scope): …`) — the changelog is generated from these. **Commit the moment your own tests
+   pass — this is the most important step; never end your turn with uncommitted work.** The host
+   merges from your commit; uncommitted work cannot be merged.
 
 7. **OPTIONAL — live proof, STRICTLY time-boxed.** Only if the issue changes something a user can
-   see, and only after steps 5–6 are done. This is bonus evidence, **not** the gate.
+   see, and only after steps 5–6 are done. This is bonus evidence, **not** a merge requirement.
    - **Hard cap: ONE attempt, ≤2 minutes total. The moment anything environmental gets in the way —
      dev server won't boot, browser/native binary missing, GPU/WebGL/renderer errors, a download
      that stalls — STOP immediately, skip the rest, and go to step 8.** Do **not** retry, do **not**
      reinstall browsers, do **not** hand-launch chrome with workaround flags. Note
-     `visual unverified (env): <one line>` in `.afk/summary.md` and move on. Your gated+committed
-     work is complete regardless. Grinding here is the #1 way agents waste their whole budget.
+     `visual unverified (env): <one line>` in `.afk/summary.md` and move on. Your committed work is
+     complete regardless. Grinding here is the #1 way agents waste their whole budget.
    - Start the app from `package.json` (e.g. `npm run dev`) in the background; note the port.
    - Use the **expect skill** (`mcp__expect__open`, `mcp__expect__playwright`,
      `mcp__expect__screenshot`) to step through the acceptance criteria like a user. Save each
      screenshot to `.afk/shots/NN-label.png` (zero-padded, e.g. `01-empty-form.png`).
    - If you captured shots, stitch the GIF: `bash .sandcastle/lib/make-gif.sh`.
-   - Write **`.afk/e2e.json`**: `{ "ok": true, "note": "what you verified" }` if it works. Only
-     write `{ "ok": false, "note": "..." }` if **your feature is genuinely broken** (not if the
-     environment merely blocked you — an env block means SKIP, leave no `e2e.json`). The host treats
-     `ok:false` as a failed gate, so never use it for environmental problems.
+   - Write **`.afk/e2e.json`**: `{ "ok": true, "note": "what you verified" }` if it works. It's
+     informational — the screenshots/GIF embed in the report. If your feature is genuinely broken,
+     don't commit it as done — write `.afk/blocked.json` (see below) so it routes to a human.
    - Backend-only / nothing visual → skip this whole step (no `.afk/e2e.json`).
 
 8. Output `<promise>COMPLETE</promise>`.
@@ -98,8 +97,8 @@ GitHub access, so everything you need is here:
 The single most common way a worker throws away good work: it launches a **slow** command (the full
 test suite) as a **background** job, then burns its entire turn budget polling with `sleep` or
 `until grep ... /tmp/*.out` loops — and the run ends BEFORE it commits. The work is done but
-uncommitted, and **uncommitted work is lost.** This is why **you don't run the full gate** — the
-host does (see step 5).
+uncommitted, and **uncommitted work is lost.** This is why you run only your own scoped tests —
+never the full suite.
 
 - Run only **your own, scoped, fast** tests — synchronously, in the foreground, with a `timeout`.
   Wait for them to return; read the output directly.
