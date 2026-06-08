@@ -68,7 +68,7 @@ if (!dockerUp) {
     const wanted = argVal("--skills")?.split(",") ?? DEFAULT_SKILLS;
     const baked = wanted.filter((s) => fs.existsSync(path.join(SKILLS_SRC, s)));
     const missing = wanted.filter((s) => !fs.existsSync(path.join(SKILLS_SRC, s)));
-    for (const s of baked) fs.cpSync(path.join(SKILLS_SRC, s), path.join(imgDir, "skills", s), { recursive: true });
+    for (const s of baked) fs.cpSync(path.join(SKILLS_SRC, s), path.join(imgDir, "skills", s), { recursive: true, dereference: true });
     ok(`baking skills: ${baked.join(", ") || "(none found in ~/.claude/skills)"}`);
     if (missing.length) console.log(`  ! not found in ${SKILLS_SRC}, skipped: ${missing.join(", ")} — install them and re-run with --rebuild`);
     const buildArgs = WIN ? [] : ["--build-arg", `AGENT_UID=${process.getuid()}`, "--build-arg", `AGENT_GID=${process.getgid()}`];
