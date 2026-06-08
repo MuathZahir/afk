@@ -64,6 +64,15 @@ const isRateLimit = (e: unknown): boolean =>
 const slug = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "feature";
 
+// Persistent cache dirs — survive across runs so workers skip re-downloading packages.
+//   npm-cache   → ~/.npm inside the container  (package tarballs; safe for parallel access)
+//   node-modules → workspace node_modules       (extracted packages; first run populates it,
+//                                                subsequent runs just verify — seconds, not minutes)
+const CACHE_ROOT = path.join(os.homedir(), ".afk", "cache");
+const NPM_CACHE_DIR = path.join(CACHE_ROOT, "npm");
+const NM_CACHE_DIR = path.join(CACHE_ROOT, "node-modules", slug(NWO));
+for (const d of [NPM_CACHE_DIR, NM_CACHE_DIR]) fs.mkdirSync(d, { recursive: true });
+
 // Serialize host-side git writes — parallel workers share ONE host repo; two concurrent
 // `checkout + merge` would corrupt the working tree.
 let gitChain: Promise<unknown> = Promise.resolve();
@@ -287,7 +296,13 @@ async function processIssue(p: Picked, results: Result[], features: Map<string, 
   let landed = false;
   try {
     sandbox = await sandcastle.createSandbox({
-      sandbox: docker({ imageName: WORKER_IMAGE }),
+      sandbox: docker({
+        imageName: WORKER_IMAGE,
+        mounts: [
+          { hostPath: NPM_CACHE_DIR, sandboxPath: "~/.npm" },
+          { hostPath: NM_CACHE_DIR, sandboxPath: "node_modules" },
+        ],
+      }),
       branch: p.branch,
       baseBranch: p.feature,                                  // build on the feature branch, not base
       hooks: { sandbox: { onSandboxReady: [{ command: CFG.setup ?? "npm ci" }] } },

@@ -98,7 +98,7 @@ if (fs.existsSync(cfgPath)) {
   // a Linux install then restore the tracked lockfile so the worktree stays git-clean.
   const setup = fs.existsSync(path.join(TARGET, "pnpm-lock.yaml")) ? "pnpm i"
     : fs.existsSync(path.join(TARGET, "yarn.lock")) ? "yarn"
-      : "rm -f package-lock.json && npm install --no-audit --no-fund && git checkout -- package-lock.json 2>/dev/null; true";
+      : "rm -f package-lock.json && npm install --no-audit --no-fund --prefer-offline && git checkout -- package-lock.json 2>/dev/null; true";
   const base = (() => { try { return shq("git", ["-C", TARGET, "symbolic-ref", "--short", "HEAD"]); } catch { return "main"; } })();
   const cfg = {
     baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5, issueTimeoutMin: 30, model: "opus",
