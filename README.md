@@ -71,7 +71,7 @@ Design choices that make it lean and safe — and why:
 
 ```bash
 # 1. clone this repo and install the CLI (once per machine):
-git clone <this-repo-url>
+git clone https://github.com/MuathZahir/afk.git
 cd afk && npm install && npm link     # provides the global `afk` command
 
 # 2. get your Claude OAuth token (once per machine):
