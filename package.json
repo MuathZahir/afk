@@ -1,7 +1,6 @@
 {
   "name": "afk",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
   "description": "Drain a GitHub ready-for-agent issue queue with isolated Claude Code workers. One milestone → one feature branch → one PR. Runs on your Claude subscription.",
   "bin": {

@@ -58,18 +58,31 @@ Design choices that make it lean and safe — and why:
 
 ---
 
+## Prerequisites
+
+| Requirement | Notes |
+| ----------- | ----- |
+| **Claude Code** | Install the CLI (`npm install -g @anthropic-ai/claude-code`) or the desktop app. **Pro or Max plan required** — AFK uses your subscription, not an API key. |
+| **Docker Desktop** | Running before you call `afk init` or `afk run`. |
+| **GitHub CLI** | `gh auth login` (needs repo + issues scope). |
+| **Skills** (optional) | AFK bakes Claude Code skills into the worker image so agents can use `/tdd`, `/find-docs`, etc. without re-downloading them each run. If you already have skills in `~/.claude/skills/` they're picked up automatically. If you don't, AFK still works — agents fall back to their built-in capabilities. See [Skills](#skills) below. |
+
 ## Setup — one command
 
-Prereqs: Docker running, `gh auth` logged in, and `claude setup-token` run once (Pro/Max).
-
 ```bash
-# install the CLI once (from this repo):
-npm install && npm link        # provides the global `afk` command
+# 1. clone this repo and install the CLI (once per machine):
+git clone <this-repo-url>
+cd afk && npm install && npm link     # provides the global `afk` command
 
-# set the token once (the installer picks it up and saves it to ~/.afk/.env):
-setx CLAUDE_CODE_OAUTH_TOKEN <token-from-claude-setup-token>
+# 2. get your Claude OAuth token (once per machine):
+#    run this inside the claude CLI or desktop app, then copy the token it prints:
+claude setup-token
+#    save it so afk can find it — on Windows:
+setx CLAUDE_CODE_OAUTH_TOKEN <token>
+#    on macOS/Linux:
+export CLAUDE_CODE_OAUTH_TOKEN=<token>   # or add to ~/.bashrc / ~/.zshrc
 
-# then, in any project:
+# 3. set up AFK in a project (once per project, run from the project root):
 afk init
 ```
 
@@ -79,9 +92,23 @@ copies the per-project harness (`implement-prompt.md`, `Dockerfile`) into `.sand
 auto-generates `.sandcastle/afk.config.json`, and updates `.gitignore`. The orchestrator itself is
 **not** copied — it lives in the `afk` package and runs via `afk run`.
 
-Baked skills (default): `tdd`, `find-docs`, `diagnose`, `frontend-design`. Choose your own with
-`afk init --skills tdd,find-docs,frontend-design,…`. `expect` (browser proof) is an MCP server set
-up in the Dockerfile, not a baked skill.
+## Skills
+
+Skills are short Markdown prompt files stored in `~/.claude/skills/`. The worker image bakes them
+in at build time so agents can invoke them as `/skill-name` without network access per-run.
+
+**Default baked skills:** `tdd`, `find-docs`, `diagnose`, `frontend-design`.  
+**Choose your own:** `afk init --skills tdd,find-docs,my-custom-skill,…`  
+**`expect`** (browser screenshots) is an MCP server wired up in the Dockerfile, not a skill file.
+
+Where to get skills:
+- Many are available from the [Matt Pocock skill ecosystem](https://github.com/mattpocock) — install
+  by copying the skill file into `~/.claude/skills/<name>`.
+- Write your own: a skill is just a Markdown file with instructions the agent reads when you invoke
+  `/skill-name`. Drop it in `~/.claude/skills/` and rebuild the image with `afk init --rebuild`.
+
+If a skill isn't found during `afk init`, it's skipped with a warning — the image still builds and
+agents work fine, just without that skill available.
 
 ## Use
 
