@@ -146,11 +146,30 @@ type Picked = { number: number; title: string; branch: string; feature: string; 
 function blockersOf(body: string): { refs: number[]; freeText: boolean } {
   const m = body.match(/#+\s*Blocked by\s*([\s\S]*?)(?:\n#+\s|\s*$)/i);
   if (!m || /none/i.test(m[1])) return { refs: [], freeText: false };
-  const refs = [...m[1].matchAll(/#(\d+)/g)].map((x) => Number(x[1]));
+  const refs = [
+    ...[...m[1].matchAll(/#(\d+)/g)].map((x) => Number(x[1])),
+    ...[...m[1].matchAll(/\/issues\/(\d+)/g)].map((x) => Number(x[1])),
+  ].filter((v, i, a) => a.indexOf(v) === i);
   return { refs, freeText: refs.length === 0 && m[1].trim().length > 0 };
 }
 const isClosed = (n: number): boolean =>
   JSON.parse(gh(["issue", "view", String(n), "--json", "state"])).state === "CLOSED";
+
+// Parse the parent issue number from a `## Parent\nhttps://github.com/.../issues/N` section.
+function parentIssueNumber(body: string): number | null {
+  const m = body.match(/##\s*Parent[\s\S]*?\/issues\/(\d+)/i);
+  return m ? Number(m[1]) : null;
+}
+
+// Cache parent number → title so we only hit the API once per parent across all picked issues.
+const parentTitleCache = new Map<number, string>();
+
+// Ensure a GitHub milestone exists (idempotent — swallows "already exists" error) and assign the
+// issue to it so the feature-branch + PR flow kicks in automatically for to-issues children.
+function autoAssignMilestone(issueNumber: number, milestoneTitle: string): void {
+  try { gh(["api", `repos/${NWO}/milestones`, "--method", "POST", "-f", `title=${milestoneTitle}`]); } catch { /* already exists */ }
+  try { gh(["issue", "edit", String(issueNumber), "--milestone", milestoneTitle]); } catch { /* ignore */ }
+}
 
 /** Re-queried every round so closing one issue can unblock its dependents in-run. */
 function pick(remaining: number): Picked[] {
@@ -162,7 +181,26 @@ function pick(remaining: number): Picked[] {
     const { refs, freeText } = blockersOf(i.body ?? "");
     if (freeText) { escalate(i.number, "Ambiguous `Blocked by` (no `#N` reference). Needs a human to clarify the dependency."); continue; }
     if (refs.some((r) => !isClosed(r))) continue; // still blocked — try a later round
-    const milestone = i.milestone?.title ?? null;
+    let milestone = i.milestone?.title ?? null;
+    // Auto-assign a milestone from the ## Parent section so to-issues children are automatically
+    // grouped onto a feature branch without requiring manual milestone assignment.
+    if (!milestone) {
+      const parentNum = parentIssueNumber(i.body ?? "");
+      if (parentNum !== null) {
+        if (!parentTitleCache.has(parentNum)) {
+          try {
+            const title: string = JSON.parse(gh(["issue", "view", String(parentNum), "--json", "title"])).title;
+            parentTitleCache.set(parentNum, title);
+          } catch { /* parent may be deleted — skip */ }
+        }
+        const parentTitle = parentTitleCache.get(parentNum);
+        if (parentTitle) {
+          autoAssignMilestone(i.number, parentTitle);
+          milestone = parentTitle;
+          console.log(`  📌 #${i.number}: auto-assigned to milestone "${parentTitle}" (from parent #${parentNum})`);
+        }
+      }
+    }
     const feature = milestone ? `feat/${slug(milestone)}` : BASE_BRANCH;
     out.push({ number: i.number, title: i.title, branch: `afk/issue-${i.number}`, feature, milestone });
     if (out.length >= remaining) break;
@@ -382,9 +420,18 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
   const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥" };
   const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status} → \`${r.feature}\`${r.media ? `  (${r.media} shot${r.media > 1 ? "s" : ""})` : ""}`);
   const mergedN = results.filter((r) => r.status === "merged").length;
+  const onFeature = results.filter((r) => r.status === "merged" && r.feature !== BASE_BRANCH).length;
+  const onBase = results.filter((r) => r.status === "merged" && r.feature === BASE_BRANCH).length;
+  const summaryLine = onFeature > 0 && onBase > 0
+    ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** merged directly to \`${BASE_BRANCH}\` (no milestone), **${results.length - mergedN}** need a human.`
+    : onFeature > 0
+    ? `**${onFeature}** issue(s) landed on feature branch(es), **${results.length - mergedN}** need a human.`
+    : onBase > 0
+    ? `**${onBase}** issue(s) merged directly to \`${BASE_BRANCH}\` (no milestone — assign issues to a milestone for the feature-branch + PR flow), **${results.length - mergedN}** need a human.`
+    : `**0** issues merged, **${results.length}** need a human.`;
   const report = [
     `# AFK run report`, ``,
-    `**${mergedN}** issue(s) landed on feature branches, **${results.length - mergedN}** need a human.`, ``,
+    summaryLine, ``,
     ...(prLinks.length ? [`## Feature PRs`, ``, ...prLinks, ``] : []),
     `## Issues`, ``, ...lines, ``,
     `> Check out a feature branch to test it, then merge its PR. Sweep the rest with \`/triage\`.`,
