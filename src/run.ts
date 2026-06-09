@@ -164,10 +164,12 @@ function blockersOf(body: string): { refs: number[]; freeText: boolean } {
 const isClosed = (n: number): boolean =>
   JSON.parse(gh(["issue", "view", String(n), "--json", "state"])).state === "CLOSED";
 
-// Parse the parent issue number from a `## Parent\nhttps://github.com/.../issues/N` section.
+// Parse the parent issue number from a `## Parent` section — handles both full URLs
+// (https://github.com/.../issues/N) and short refs (#N).
 function parentIssueNumber(body: string): number | null {
-  const m = body.match(/##\s*Parent[\s\S]*?\/issues\/(\d+)/i);
-  return m ? Number(m[1]) : null;
+  const section = body.match(/##\s*Parent\s*([\s\S]*?)(?:\n##\s|\s*$)/i)?.[1] ?? "";
+  const n = section.match(/\/issues\/(\d+)/)?.[1] ?? section.match(/#(\d+)/)?.[1];
+  return n ? Number(n) : null;
 }
 
 // Cache parent number → title so we only hit the API once per parent across all picked issues.
@@ -298,7 +300,10 @@ async function processIssue(p: Picked, results: Result[], features: Map<string, 
     sandbox = await sandcastle.createSandbox({
       sandbox: docker({
         imageName: WORKER_IMAGE,
-        mounts: [
+        // Windows paths contain drive-letter colons that break Docker's host:container:options
+        // mount syntax. Skip the cache mounts on Windows — workers run without them (slower
+        // first install, but correct). On Linux/macOS the caches shave minutes off each run.
+        mounts: process.platform === "win32" ? [] : [
           { hostPath: NPM_CACHE_DIR, sandboxPath: "~/.npm" },
           { hostPath: NM_CACHE_DIR, sandboxPath: "node_modules" },
         ],
