@@ -77,14 +77,19 @@ cd afk && npm install && npm link     # provides the global `afk` command
 # 2. get your Claude OAuth token (once per machine):
 #    run this inside the claude CLI or desktop app, then copy the token it prints:
 claude setup-token
-#    save it so afk can find it — on Windows:
-setx CLAUDE_CODE_OAUTH_TOKEN <token>
-#    on macOS/Linux:
-export CLAUDE_CODE_OAUTH_TOKEN=<token>   # or add to ~/.bashrc / ~/.zshrc
+#    save it where afk looks for it (works in bash, zsh, and PowerShell 7+):
+mkdir -p ~/.afk && echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" > ~/.afk/.env
 
 # 3. set up AFK in a project (once per project, run from the project root):
 afk init
 ```
+
+> **Why a file and not an environment variable?** `~/.afk/.env` is read only by the afk
+> orchestrator, which passes the token only into the worker containers. Setting
+> `CLAUDE_CODE_OAUTH_TOKEN` globally (e.g. `setx` on Windows or `~/.bashrc`) also works, but it
+> overrides the login auth of **every** `claude` session on your machine — avoid it unless that's
+> what you want. For a per-project token, use `.sandcastle/.env` instead (takes precedence over
+> the global file).
 
 `afk init` does **everything**: saves your token to `~/.afk/.env` (reused by every project),
 builds the shared `afk-worker` image with your skills baked in (once; `--rebuild` to refresh),
