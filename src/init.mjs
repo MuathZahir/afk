@@ -101,7 +101,10 @@ if (fs.existsSync(cfgPath)) {
       : "rm -f package-lock.json && npm install --no-audit --no-fund --prefer-offline && git checkout -- package-lock.json 2>/dev/null; true";
   const base = (() => { try { return shq("git", ["-C", TARGET, "symbolic-ref", "--short", "HEAD"]); } catch { return "main"; } })();
   const cfg = {
-    baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5, issueTimeoutMin: 30, model: "opus",
+    baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5,
+    idleTimeoutMin: 10, absoluteTimeoutMin: 90, maxFixAttempts: 1,
+    model: "opus",
+    models: { implement: "opus", verify: "sonnet", fix: "opus", classify: "haiku" },
     setup,
     labels: { ready: "ready-for-agent", human: "ready-for-human" },
   };

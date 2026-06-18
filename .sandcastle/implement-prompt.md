@@ -8,6 +8,7 @@ GitHub access, so everything you need is here:
 <issue>
 {{ISSUE_JSON}}
 </issue>
+{{RETRY_NOTE}}
 
 # GROUND RULES
 
@@ -130,9 +131,10 @@ own tests and they pass, you are NOT blocked — commit and finish normally.
 (a few minutes, not an hour). To bail:
 
 1. Commit whatever real progress you made (specific paths only — never `node_modules`/lockfiles).
-2. Write `.afk/blocked.json`:
+2. Write `.afk/blocked.json` with **`"category": "env"`** — this tells the host it's an environment
+   problem, not your code, so it routes straight to a human and does **not** waste a retry on it:
    ```json
-   { "reason": "one line — what's broken", "detail": "what you saw + what you tried" }
+   { "category": "env", "reason": "one line — what's broken", "detail": "what you saw + what you tried" }
    ```
 3. Write the same into `.afk/summary.md`.
 4. Output `<promise>COMPLETE</promise>`.
@@ -145,6 +147,7 @@ eventually works.
 # IF YOU'RE STUCK ON YOUR OWN CODE
 
 If the bug *is* yours but you genuinely can't get your tests green (hard or underspecified issue),
-write what blocked you into `.afk/summary.md` **and `.afk/blocked.json`** (so the host routes it to
+write what blocked you into `.afk/summary.md` **and `.afk/blocked.json` with `"category": "code"`**
+(so the host gives the work one more automatic attempt with your notes as context, then routes it to
 a human instead of merging it), commit what you have, and output `<promise>COMPLETE</promise>`. That
 is a fine outcome — far better than committing code you know is broken as if it were done.

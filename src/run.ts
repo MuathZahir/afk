@@ -31,8 +31,20 @@ const WORKER_IMAGE = "afk-worker";                       // shared image, built 
 const BASE_BRANCH: string = CFG.baseBranch ?? "main";
 const MAX_PARALLEL: number = CFG.maxParallel ?? 2;
 const MAX_ISSUES: number = CFG.maxIssuesPerRun ?? 5;
-const ISSUE_TIMEOUT_MS: number = (CFG.issueTimeoutMin ?? 30) * 60_000;
-const MODEL: string = CFG.model ?? "opus";
+// Timeouts (v2): idle — no agent activity for this long — is the real "stuck" signal; the absolute
+// cap is only a backstop so a productively-working long task is never guillotined mid-work. The
+// legacy single `issueTimeoutMin` maps to the absolute cap when the newer keys are absent.
+const IDLE_TIMEOUT_SEC: number = (CFG.idleTimeoutMin ?? 10) * 60;
+const ABSOLUTE_TIMEOUT_MS: number = (CFG.absoluteTimeoutMin ?? CFG.issueTimeoutMin ?? 90) * 60_000;
+const ABSOLUTE_TIMEOUT_MIN: number = ABSOLUTE_TIMEOUT_MS / 60_000;
+// Per-role models (v2). Under subscription auth the win is preserving the Opus rate-window for hard
+// work, not $. Falls back to the single `model` knob. Only `implement` is wired in Phase 0 (the
+// only role that exists yet); verify/fix/classify are reserved for later phases.
+const MODELS = CFG.models ?? {};
+const MODEL_IMPLEMENT: string = MODELS.implement ?? CFG.model ?? "opus";
+// Bounded self-correction (v2): re-run the implementer when it self-declares stuck on its OWN code
+// (not an environment block) before escalating to a human. 0 disables; 1 = one extra attempt.
+const MAX_FIX_ATTEMPTS: number = CFG.maxFixAttempts ?? 1;
 const L_READY: string = CFG.labels?.ready ?? "ready-for-agent";
 const L_HUMAN: string = CFG.labels?.human ?? "ready-for-human";
 const RELEASE_TAG = "afk-artifacts";
@@ -313,31 +325,59 @@ async function processIssue(p: Picked, results: Result[], features: Map<string, 
       hooks: { sandbox: { onSandboxReady: [{ command: CFG.setup ?? "npm ci" }] } },
     });
 
+    const afk = path.join(sandbox.worktreePath, ".afk");
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(new Error(`issue #${p.number} exceeded ${CFG.issueTimeoutMin}m`)), ISSUE_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => ac.abort(new Error(`issue #${p.number} hit the ${ABSOLUTE_TIMEOUT_MIN}m absolute cap`)),
+      ABSOLUTE_TIMEOUT_MS,
+    );
     let commits = 0;
+    let blocked: any = null;
     try {
-      const r = await sandbox.run({
-        name: `impl-#${p.number}`,
-        agent: sandcastle.claudeCode(MODEL, { env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH } }),
-        promptFile: ".sandcastle/implement-prompt.md",
-        completionSignal: "<promise>COMPLETE</promise>",
-        promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, BRANCH: p.branch, ISSUE_JSON: issueJson },
-        signal: ac.signal,
-      });
-      commits = r.commits.length;
+      // Bounded self-correction loop. The implementer gets up to MAX_FIX_ATTEMPTS extra tries when it
+      // declares itself stuck on its OWN code (blocked.json with category !== "env") or produces
+      // nothing at all. Each retry re-runs in the SAME sandbox — worktree + partial work preserved —
+      // with the prior blocker injected as context. Idle timeout (no activity) ends a hung run; the
+      // absolute cap above is the final backstop. Env blocks and thrown errors never retry.
+      for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+        try { fs.rmSync(path.join(afk, "blocked.json"), { force: true }); } catch { /* none yet */ }
+        const retryNote = attempt === 0 ? "" :
+          `\n\n# RETRY ${attempt}/${MAX_FIX_ATTEMPTS}\n` +
+          `A previous attempt got stuck on its OWN code (not the environment):\n` +
+          `${blocked?.reason ?? ""}\n${blocked?.detail ?? ""}\n` +
+          `Your partial work is already in the tree. Take a different approach and commit the moment ` +
+          `your own scoped tests pass. If it is genuinely an environment problem, write .afk/blocked.json ` +
+          `with "category":"env" and stop.`;
+        const r = await sandbox.run({
+          name: `impl-#${p.number}${attempt ? `-retry${attempt}` : ""}`,
+          agent: sandcastle.claudeCode(MODEL_IMPLEMENT, { env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH } }),
+          promptFile: ".sandcastle/implement-prompt.md",
+          completionSignal: "<promise>COMPLETE</promise>",
+          promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, BRANCH: p.branch, ISSUE_JSON: issueJson, RETRY_NOTE: retryNote },
+          idleTimeoutSeconds: IDLE_TIMEOUT_SEC,
+          signal: ac.signal,
+        });
+        commits = r.commits.length;
+        blocked = readJson(path.join(afk, "blocked.json"));
+        const envBlocked = !!blocked && String(blocked.category ?? "").toLowerCase() === "env";
+        const stuckOnOwnCode = !!blocked && !envBlocked;
+        const producedNothing = commits === 0 && !blocked;
+        if (!stuckOnOwnCode && !producedNothing) break;   // success, or env-block → escalate (no retry)
+        if (attempt >= MAX_FIX_ATTEMPTS) break;            // out of retries
+        console.log(`  ↻ #${p.number}: self-correction retry ${attempt + 1}/${MAX_FIX_ATTEMPTS} (${stuckOnOwnCode ? "stuck on own code" : "no commits"}).`);
+      }
     } catch (e) {
       if (isRateLimit(e)) throw e;
       if (sandbox && !branchAhead(p.branch, p.feature)) rescueUncommitted(sandbox.worktreePath, p);
-      const reason = ac.signal.aborted ? `Worker timed out after ${CFG.issueTimeoutMin}m.` : "Worker errored before finishing.";
+      const reason = ac.signal.aborted
+        ? `Worker hit the ${ABSOLUTE_TIMEOUT_MIN}m absolute cap.`
+        : `Worker stalled (idle > ${IDLE_TIMEOUT_SEC / 60}m) or errored before finishing.`;
       preserve = escalate(p.number, reason, `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, branchAhead(p.branch, p.feature) ? p.branch : undefined);
       results.push({ num: p.number, title: p.title, status: ac.signal.aborted ? "timeout" : "error", feature: p.feature });
       return;
     } finally { clearTimeout(timer); }
 
-    const afk = path.join(sandbox.worktreePath, ".afk");
     const e2e = readJson(path.join(afk, "e2e.json"));
-    const blocked = readJson(path.join(afk, "blocked.json"));
     const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
 
     const rescued = commits === 0 && rescueUncommitted(sandbox.worktreePath, p);

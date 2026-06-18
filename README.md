@@ -51,8 +51,10 @@ Design choices that make it lean and safe — and why:
   back to merging straight to the base branch.
 - **The worker has no GitHub token.** The issue is injected into its prompt; every GitHub mutation
   (merge, comment, close, PR, asset upload) happens on the host. Smaller blast radius.
-- **Failures route to humans, not retries.** A stuck issue gets `ready-for-human` and is skipped
-  thereafter, so it never silently burns quota in a loop. Sweep them with `/triage`.
+- **Failures self-correct once, then route to humans.** When a worker gets stuck on its *own* code it
+  gets a bounded retry (`maxFixAttempts`, default 1) with its own notes injected as context; genuine
+  dead-ends and **environment** problems (`"category":"env"`) skip the retry and get `ready-for-human`,
+  skipped thereafter so quota is never burned in a loop. Sweep the pile with `/triage`.
 - **No lost work.** If a worker finishes (or times out) without committing, the host commits its
   uncommitted source changes so nothing is thrown away, and routes it to a human.
 
@@ -151,8 +153,11 @@ PR. `/triage` the `ready-for-human` pile. At release time, `afk changelog --rele
 | `baseBranch` | current branch | PRs target this branch |
 | `maxParallel` | `2` | concurrent workers (respects subscription rate windows) |
 | `maxIssuesPerRun` | `5` | cap per `afk run` |
-| `issueTimeoutMin` | `30` | per-issue wall-clock budget |
-| `model` | `opus` | agent model |
+| `idleTimeoutMin` | `10` | kill a worker after this long with **no activity** (the real "stuck" signal) |
+| `absoluteTimeoutMin` | `90` | hard backstop so a productively-working long task is never cut off mid-work (legacy `issueTimeoutMin` is still honored as this) |
+| `maxFixAttempts` | `1` | extra self-correction tries when a worker is stuck on its **own** code, before escalating |
+| `model` | `opus` | default agent model (fallback for `models`) |
+| `models` | per-role | optional `{ implement, verify, fix, classify }` overrides (only `implement` is wired today) |
 | `setup` | auto-detected | install command run **inside** the Linux container |
 | `labels` | `ready-for-agent` / `ready-for-human` | queue + escalation labels |
 

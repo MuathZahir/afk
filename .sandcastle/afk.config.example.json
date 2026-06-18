@@ -2,8 +2,11 @@
   "baseBranch": "main",
   "maxParallel": 2,
   "maxIssuesPerRun": 5,
-  "issueTimeoutMin": 30,
+  "idleTimeoutMin": 10,
+  "absoluteTimeoutMin": 90,
+  "maxFixAttempts": 1,
   "model": "opus",
+  "models": { "implement": "opus", "verify": "sonnet", "fix": "opus", "classify": "haiku" },
   "setup": "rm -f package-lock.json && npm install --no-audit --no-fund && git checkout -- package-lock.json 2>/dev/null; true",
   "labels": { "ready": "ready-for-agent", "human": "ready-for-human" }
 }
