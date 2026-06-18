@@ -189,6 +189,7 @@ function pick(remaining: number): Picked[] {
   );
   const out: Picked[] = [];
   for (const i of ready) {
+    if (processedThisRun.has(i.number)) continue; // already handled this run — skip even if label removal failed
     const { refs, freeText } = blockersOf(i.body ?? "");
     if (freeText) { escalate(i.number, "Ambiguous `Blocked by` (no `#N` reference). Needs a human to clarify the dependency."); continue; }
     if (refs.some((r) => !isClosed(r))) continue; // still blocked — try a later round
@@ -220,7 +221,13 @@ function pick(remaining: number): Picked[] {
 }
 
 // ── reporting side-effects (host only) ───────────────────────────────────────
+
+// Issues touched this run — prevents re-queuing the same issue if GitHub API calls fail and
+// the ready-for-agent label can't be removed (e.g. a transient 401 mid-run).
+const processedThisRun = new Set<number>();
+
 function escalate(num: number, reason: string, detail = "", branch?: string): boolean {
+  processedThisRun.add(num);
   let preserved = false;
   let branchNote = "";
   if (branch) {
@@ -228,9 +235,12 @@ function escalate(num: number, reason: string, detail = "", branch?: string): bo
     try { git(["push", "-u", "origin", branch]); branchNote = `\n\n🌿 Partial work pushed to branch \`${branch}\`.`; }
     catch { branchNote = `\n\n🌿 Partial work kept on local branch \`${branch}\`.`; }
   }
-  gh(["issue", "comment", String(num), "--body",
-    `> *Posted by AFK.*\n\n🛑 **Needs a human.**\n\n${reason}\n${detail}${branchNote}`]);
+  // Label removal comes first — if the comment fails we still want the issue off the queue.
   try { gh(["issue", "edit", String(num), "--remove-label", L_READY, "--add-label", L_HUMAN]); } catch { /* labels may not exist */ }
+  try {
+    gh(["issue", "comment", String(num), "--body",
+      `> *Posted by AFK.*\n\n🛑 **Needs a human.**\n\n${reason}\n${detail}${branchNote}`]);
+  } catch { /* comment is best-effort; the label removal above is what matters */ }
   return preserved;
 }
 let releaseReady = false;
@@ -376,6 +386,7 @@ async function processIssue(p: Picked, results: Result[], features: Map<string, 
     const media = uploadMedia(p.number, afk);
     const verified = e2e?.ok === true ? "\n\n🔎 Verified in the browser: " + (e2e.note ?? "ok") : "";
     const where = p.feature === BASE_BRANCH ? `\`${BASE_BRANCH}\`` : `\`${p.feature}\` (feature branch)`;
+    processedThisRun.add(p.number);
     gh(["issue", "comment", String(p.number), "--body",
       `> *Posted by AFK.*\n\n✅ **Done — landed on ${where}.**\n\n${summary}${verified}${media.markdown}`]);
     try { gh(["issue", "edit", String(p.number), "--remove-label", L_READY]); } catch { /* label may not exist */ }
