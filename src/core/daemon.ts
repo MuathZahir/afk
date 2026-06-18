@@ -163,6 +163,16 @@ export class Daemon {
     } catch (e) { return { ok: false, error: String((e as Error)?.message ?? e) }; }
   }
 
-  /** Record an answer to an agent's clarifying question (question protocol is a later upgrade). */
-  answer(id: string, text: string): void { this.store.append({ type: "answer", id, answer: text }); }
+  /**
+   * Answer an agent's clarifying question: post it as an issue comment and re-queue the issue, so
+   * the next run resumes with the answer in context (the prompt includes issue comments). Question
+   * ids are `q-<issue>`, so the issue number is recoverable.
+   */
+  answer(id: string, text: string): void {
+    this.store.append({ type: "answer", id, answer: text });
+    const issue = Number(id.replace(/^q-/, ""));
+    if (!Number.isFinite(issue)) return;
+    try { gh(["issue", "comment", String(issue), "--body", `> *Answer via AFK dashboard.*\n\n${text}`]); } catch { /* ignore */ }
+    this.retry(issue);
+  }
 }

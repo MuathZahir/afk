@@ -48,6 +48,9 @@ export async function verifyFeature(
   if (!gate.ok) return { kind: "unverified", reason: gate.reason };
 
   const featureSlug = slug(feature.title);
+  // When the app is started directly (verify.appBoot) rather than by compose, it needs its deps —
+  // run setup + reuse the package caches. A pure compose stack skips this (builds inside containers).
+  const needsDeps = !!cfg.verify.appBoot;
   let sandbox: sandcastle.Sandbox | undefined;
   try {
     sandbox = await sandcastle.createSandbox({
@@ -55,10 +58,17 @@ export async function verifyFeature(
         imageName: WORKER_IMAGE,
         // Mount the host Docker socket so the in-sandbox agent drives `docker compose` on the host
         // daemon (verify-in-place, not docker-in-docker). canVerify already excluded Windows.
-        mounts: [{ hostPath: DOCKER_SOCK, sandboxPath: DOCKER_SOCK }],
+        mounts: [
+          { hostPath: DOCKER_SOCK, sandboxPath: DOCKER_SOCK },
+          ...(needsDeps ? [
+            { hostPath: cfg.npmCacheDir, sandboxPath: "~/.npm" },
+            { hostPath: cfg.nmCacheDir, sandboxPath: "node_modules" },
+          ] : []),
+        ],
       }),
       branch: feature.branch,
       baseBranch: feature.branch, // branch already exists; baseBranch is ignored
+      ...(needsDeps ? { hooks: { sandbox: { onSandboxReady: [{ command: cfg.setup }] } } } : {}),
     });
 
     const afk = path.join(sandbox.worktreePath, ".afk");

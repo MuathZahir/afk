@@ -124,6 +124,21 @@ export class Engine {
     return !!branch;
   }
 
+  /** Surface an agent's clarifying question as an issue comment + dashboard card; pause the issue. */
+  private ask(p: Picked, q: { question?: string; detail?: string }, branch?: string): boolean {
+    let branchNote = "";
+    if (branch) {
+      try { git(["push", "-u", "origin", branch]); branchNote = `\n\n🌿 Partial work pushed to \`${branch}\` — it resumes when you answer.`; }
+      catch { branchNote = `\n\n🌿 Partial work kept on local branch \`${branch}\`.`; }
+    }
+    gh(["issue", "comment", String(p.number), "--body",
+      `> *Posted by AFK.*\n\n❓ **AFK needs input.**\n\n${q.question}\n${q.detail ? `\n${q.detail}` : ""}` +
+      `\n\nReply here (or answer on the dashboard) and AFK will resume this issue with your answer in context.${branchNote}`]);
+    try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady, "--add-label", this.cfg.labelHuman]); } catch { /* labels */ }
+    this.emit({ type: "question", id: `q-${p.number}`, issue: p.number, prompt: q.question ?? "" });
+    return !!branch;
+  }
+
   // ── evidence (release assets posted to issue/PR) ──────────────────────────────
   private ensureRelease(): void {
     if (this.releaseReady) return;
@@ -228,9 +243,20 @@ export class Engine {
       } finally { clearTimeout(timer); }
 
       const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
-      const rescued = commits === 0 && this.rescueUncommitted(sandbox.worktreePath, p);
+      const question = readJson(path.join(afk, "question.json")) as { question?: string; detail?: string } | null;
+      const rescued = commits === 0 && !question && this.rescueUncommitted(sandbox.worktreePath, p);
       if (rescued) commits = 1;
       const workBranch = commits > 0 ? p.branch : undefined;
+
+      // A clarifying question takes priority: the agent hit a genuine decision it shouldn't guess.
+      // Post it (issue comment + dashboard card) and pause this issue until a human answers — the
+      // answer lands as a comment, so the next run sees it in context. This is the pressure-release
+      // valve so agents ask instead of guessing or escalating wholesale.
+      if (question?.question) {
+        preserve = this.ask(p, question, workBranch);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "question" });
+        return done({ num: p.number, title: p.title, status: "question", feature: p.feature });
+      }
 
       if (commits === 0 && !blocked) {
         this.escalate(p.number, p.title, "The worker produced no commits and left no uncommitted work to recover.");
@@ -314,30 +340,43 @@ export class Engine {
   }
 
   // ── feature completion: verify → fix loop → PR ───────────────────────────────
-  /** Count open issues still carrying the ready label that belong to this feature. */
-  private featureOpenReadyCount(feature: Feature): number {
+  /**
+   * The feature's children as GitHub sees them right now, partitioned by state. Authoritative — so
+   * verify covers EVERY criterion and the PR closes EVERY child, even ones that landed in an earlier
+   * `afk run` (when the in-memory `feature.merged` only holds this run's issues).
+   */
+  private featureChildren(feature: Feature): { openReady: number[]; landed: number[] } {
     try {
+      let all: { number: number; state: string; body?: string; labels?: { name: string }[] }[];
       if (feature.key.startsWith("ms-")) {
-        return JSON.parse(gh(["issue", "list", "--milestone", feature.title, "--state", "open", "--label", this.cfg.labelReady, "--json", "number"])).length;
+        all = JSON.parse(gh(["issue", "list", "--milestone", feature.title, "--state", "all", "--json", "number,state,labels", "--limit", "200"]));
+      } else {
+        const epicNum = feature.key.replace("epic-", "");
+        const re = new RegExp(`/issues/${epicNum}\\b|#${epicNum}\\b`);
+        all = (JSON.parse(gh(["issue", "list", "--state", "all", "--json", "number,state,body,labels", "--limit", "200"])) as typeof all)
+          .filter((i) => /##\s*Parent/i.test(i.body ?? "") && re.test(i.body ?? ""));
       }
-      // epic: ready+open issues whose `## Parent` points at this epic.
-      const epicNum = feature.key.replace("epic-", "");
-      const open: { number: number; body: string }[] = JSON.parse(
-        gh(["issue", "list", "--label", this.cfg.labelReady, "--state", "open", "--json", "number,body", "--limit", "100"]),
-      );
-      const re = new RegExp(`/issues/${epicNum}\\b|#${epicNum}\\b`);
-      return open.filter((i) => /##\s*Parent/i.test(i.body ?? "") && re.test(i.body ?? "")).length;
-    } catch { return 0; }
+      const hasReady = (i: { labels?: { name: string }[] }) => (i.labels ?? []).some((l) => l.name === this.cfg.labelReady);
+      const openReady = all.filter((i) => i.state === "OPEN" && hasReady(i)).map((i) => i.number);
+      const landed = all.filter((i) => i.state === "CLOSED").map((i) => i.number);
+      return { openReady, landed };
+    } catch { return { openReady: [], landed: [] }; }
   }
 
-  /** True when every child of the feature has landed (no ready ones left) and ≥1 merged this run. */
+  /** Authoritative landed-children set: this run's merges ∪ GitHub's closed children, deduped. */
+  private landedChildren(feature: Feature): number[] {
+    return [...new Set([...feature.merged, ...this.featureChildren(feature).landed])].sort((a, b) => a - b);
+  }
+
+  /** True when every child of the feature has landed (no ready ones left) and ≥1 has merged. */
   isFeatureComplete(feature: Feature): boolean {
-    return feature.merged.length > 0 && this.featureOpenReadyCount(feature) === 0;
+    const { openReady, landed } = this.featureChildren(feature);
+    return openReady.length === 0 && (feature.merged.length > 0 || landed.length > 0);
   }
 
-  /** Build the JSON of the feature's merged issues — their bodies carry the acceptance criteria. */
+  /** Build the JSON of the feature's landed issues — their bodies carry the acceptance criteria. */
   private featureIssuesJson(feature: Feature): string {
-    const issues = feature.merged.map((n) => {
+    const issues = this.landedChildren(feature).map((n) => {
       try { return JSON.parse(gh(["issue", "view", String(n), "--json", "number,title,body"])); } catch { return { number: n }; }
     });
     return JSON.stringify(issues, null, 2);
@@ -396,8 +435,8 @@ export class Engine {
     await this.withGitLock(() => { try { git(["checkout", this.cfg.baseBranch]); } catch { /* ignore */ } });
     try { git(["push", "origin", feature.branch]); } catch { /* may be up to date */ }
 
-    const incomplete = this.featureOpenReadyCount(feature) > 0;
-    const closes = feature.merged.slice().sort((a, b) => a - b).map((n) => `Closes #${n}`).join("\n");
+    const incomplete = this.featureChildren(feature).openReady.length > 0;
+    const closes = this.landedChildren(feature).map((n) => `Closes #${n}`).join("\n");
 
     let status: string; let state: "draft" | "ready";
     if (incomplete) { status = `⏳ Feature not complete yet — draft until all child issues land.`; state = "draft"; }

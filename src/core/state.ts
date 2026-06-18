@@ -25,7 +25,7 @@ export type EventBody =
 /** A persisted event: a body plus the timestamp the store stamps on. */
 export type Event = { ts: string } & EventBody;
 export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify";
-export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued";
+export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question";
 export type FeatureState = "building" | "verifying" | "fixing" | "verified" | "unverified" | "pr-open" | "merged" | "needs-human";
 
 // ── snapshot (what the dashboard renders) ───────────────────────────────────────

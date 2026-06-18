@@ -126,6 +126,21 @@ thrown away. Bailing early on a tooling problem is the **correct, expected** out
 hour and a chunk of the token budget fixing someone else's broken install is a failure, even if it
 eventually works.
 
+# IF YOU NEED A PRODUCT DECISION — ASK, DON'T GUESS
+
+If the issue is **genuinely ambiguous about what to build** (a real product/UX/data decision the
+acceptance criteria don't settle), don't guess and don't escalate the whole issue. Ask one crisp
+question:
+
+1. Commit any safe partial work (specific paths only).
+2. Write `.afk/question.json`: `{ "question": "the one decision you need", "detail": "the options you see + your recommendation" }`.
+3. Output `<promise>COMPLETE</promise>`.
+
+The host posts your question to the issue and pauses it; when a human answers, AFK re-runs this
+issue with their answer already in the issue comments. **Only for genuine decisions** — never for
+something you can resolve by reading the code, and never for environment/tooling problems (those are
+the bail path below). One question, not a conversation.
+
 # IF YOU'RE STUCK ON YOUR OWN CODE
 
 If the bug *is* yours but you genuinely can't get your tests green (hard or underspecified issue),

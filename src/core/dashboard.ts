@@ -55,6 +55,7 @@ export const SPA = /* html */ `<!doctype html>
   .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .s-merged{ background:var(--good); } .s-implementing{ background:var(--info); box-shadow:0 0 0 0 var(--info); animation:pulse 1.6s infinite; }
   .s-escalated,.s-blocked,.s-conflict,.s-error,.s-timeout{ background:var(--bad); } .s-queued,.s-rescued{ background:var(--faint); }
+  .s-question{ background:var(--warn); }
   @keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(74,168,255,.5);} 70%{ box-shadow:0 0 0 7px rgba(74,168,255,0);} 100%{ box-shadow:0 0 0 0 rgba(74,168,255,0);} }
   .agent { display:flex; align-items:center; gap:11px; padding:10px 14px; border-bottom:1px solid var(--line); }
   .agent:last-child{ border-bottom:none; }

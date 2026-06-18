@@ -67,7 +67,7 @@ export type Feature = { key: string; title: string; branch: string; merged: numb
 
 // ── per-issue/feature outcomes ────────────────────────────────────────────────
 export type IssueStatus =
-  | "merged" | "rescued" | "blocked" | "timeout" | "conflict" | "no-commits" | "error";
+  | "merged" | "rescued" | "blocked" | "timeout" | "conflict" | "no-commits" | "error" | "question";
 export type Result = { num: number; title: string; status: IssueStatus; feature: string; media?: number };
 
 // ── verification (Phase 1) ─────────────────────────────────────────────────────

@@ -98,6 +98,16 @@ Applies to the existing per-issue engine; no architecture change.
 - **Actions:** one-click merge a ready PR, re-queue an escalation, answer a question, pause/resume.
   Every action earns its place against "could you just do this in GitHub?"
 
+## Shipped: clarifying-question protocol (the ask-don't-guess valve)
+
+The pressure-release valve from REDESIGN.md, wired through **existing channels** (no fragile new
+plumbing): when an agent hits a genuine product/UX/data decision the acceptance criteria don't
+settle, it writes `.afk/question.json` instead of guessing or escalating wholesale. The host posts
+the question as an issue comment + a dashboard card and pauses the issue. Answering on the dashboard
+(`answer`) posts the reply as an issue comment and re-queues the issue — so the next run resumes with
+the Q&A already in context (the implement prompt's `ISSUE_JSON` includes comments). Tightly scoped in
+the prompt: decisions only, one question, never for code or environment problems.
+
 ---
 
 ## Files
@@ -145,8 +155,6 @@ These paths are typecheck-clean and designed to degrade safely, but cannot be ex
 
 ## Roadmap (open second-order items from REDESIGN.md)
 
-- Clarifying-question *protocol*: the dashboard renders + answers questions, but agents don't yet have
-  an in-sandbox channel to *raise* one (today they escalate). Wiring `.afk/question.json` → a pause →
-  the dashboard answer → resume is the next increment.
 - SQLite state store (vs. the current JSONL event log) if the log grows large.
 - Multi-repo (one daemon, many repos) and webhook-triggered polling.
+- Push notifications for question/escalation cards (the design's optional nicety).

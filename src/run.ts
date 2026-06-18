@@ -67,7 +67,7 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
 })();
 
 function writeReport(results: Result[], features: Feature[], baseBranch: string): void {
-  const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥" };
+  const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥", question: "❓" };
   const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status} → \`${r.feature}\``);
   const mergedN = results.filter((r) => r.status === "merged").length;
   const onFeature = results.filter((r) => r.status === "merged" && r.feature !== baseBranch).length;
