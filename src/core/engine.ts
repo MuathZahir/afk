@@ -397,7 +397,6 @@ export class Engine {
     try { git(["push", "origin", feature.branch]); } catch { /* may be up to date */ }
 
     const incomplete = this.featureOpenReadyCount(feature) > 0;
-    const greenOrUnverified = !incomplete && (v.verdict?.ok || (!v.verdict && !!v.unverifiedReason));
     const closes = feature.merged.slice().sort((a, b) => a - b).map((n) => `Closes #${n}`).join("\n");
 
     let status: string; let state: "draft" | "ready";
@@ -409,11 +408,9 @@ export class Engine {
     const body = `> *Opened by AFK.*\n\nImplements **${feature.title}**.\n\n${closes}\n\n${status}`;
     const url = this.createOrUpdatePR(feature.branch, feature.title, body, state === "draft");
     if (url) this.emit({ type: "pr", feature: feature.key, url, state });
-    this.emit({ type: "feature-state", feature: feature.key, title: feature.title, state: incomplete ? "building" : v.verdict?.ok ? "verified" : v.verdict ? "needs-human" : "unverified" });
-    if (!greenOrUnverified && !incomplete && v.verdict && !v.verdict.ok) {
-      // surface the failed feature in the needs-human queue without closing children
-      this.emit({ type: "feature-state", feature: feature.key, title: feature.title, state: "needs-human" });
-    }
+    // One feature-state: building (incomplete) · verified (green) · needs-human (verify failed) · unverified.
+    const fState = incomplete ? "building" : v.verdict?.ok ? "verified" : v.verdict ? "needs-human" : "unverified";
+    this.emit({ type: "feature-state", feature: feature.key, title: feature.title, state: fState });
     return url;
   }
 

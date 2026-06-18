@@ -128,7 +128,7 @@ const cur = fs.existsSync(gi) ? fs.readFileSync(gi, "utf8") : "";
 const add = want.filter((w) => !cur.split("\n").some((l) => l.trim() === w));
 if (add.length) fs.appendFileSync(gi, `\n# AFK\n${add.join("\n")}\n`);
 
-console.log(`\n✅ Done. The loop:\n    cd ${path.relative(process.cwd(), TARGET) || "."}\n    /grill-with-docs → /to-issues (assign a milestone per feature) → afk run\n`);
+console.log(`\n✅ Done. The loop:\n    cd ${path.relative(process.cwd(), TARGET) || "."}\n    /grill-with-docs → /to-issues (epic parent + sub-issues) → afk run   (or: afk watch)\n`);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function readEnv(file) {

@@ -1,94 +1,152 @@
 # AFK v2 — Implementation log
 
 Companion to [`REDESIGN.md`](./REDESIGN.md) (the full target architecture). This file records what
-has actually been **built** so far, and what is intentionally still on the roadmap.
+has actually been **built**, and what is intentionally still on the roadmap.
+
+**Status: Phases 0–4 shipped.** The batch engine (`afk run`) and the continuous daemon + dashboard
+(`afk watch`) both drive one shared, unit-tested host engine. The deterministic core (planning,
+routing, state) is covered by tests that run with no Docker/GitHub/LLM; the live agent + Docker paths
+are typecheck-clean and carefully designed against confirmed sandcastle APIs, and degrade gracefully
+where a live environment is required (see "What still needs live validation").
+
+---
+
+## Architecture
+
+A single shared **`Engine`** (`src/core/engine.ts`) owns all the deterministic host orchestration and
+every proven safety net (serialized git writes, uncommitted-work rescue, stale worktree/container
+reaping). Two thin drivers wrap it:
+
+- **`afk run`** (`src/run.ts`) — drain the queue once, then exit.
+- **`afk watch`** (`src/watch.ts` → `core/daemon.ts` + `core/server.ts`) — a continuous lifecycle
+  manager + local dashboard.
+
+The engine reports side effects two ways: a human `log()` line and a structured `emit()` event. The
+daemon wires `emit` to an append-only event-log **state store** (`core/state.ts`), which is both its
+restart memory and the dashboard's data source. This is REDESIGN.md decision #1 — *evolve the engine,
+don't rebuild it* — made concrete.
 
 ---
 
 ## Shipped: Phase 0 — robustness quick wins
 
-Phase 0 was chosen first because the design doc flags it as "biggest pain relief for least code, **no
-architecture change**." Everything here applies to the existing `afk run` engine and is verifiable by
-the typechecker — no live Docker/app environment required to build it safely. It directly attacks the
-three pains you named: **timeouts, over-eager `ready-for-human`, and lost time on stuck work.**
+Applies to the existing per-issue engine; no architecture change.
 
-### 1. Idle-based timeouts + absolute backstop (was: a single hard wall-clock)
+- **Idle-based timeouts + absolute backstop.** Killed on inactivity (`idleTimeoutMin`, sandcastle's
+  native idle detection — the real "stuck" signal), with a generous `absoluteTimeoutMin` backstop so a
+  productive long task is never guillotined. Legacy `issueTimeoutMin` maps to the absolute cap.
+- **Bounded self-correction.** When the implementer self-declares stuck on its **own** code (or
+  produces nothing), the host re-runs it in the same sandbox with the prior blocker injected
+  (`{{RETRY_NOTE}}`), up to `maxFixAttempts`. Environment blocks (`"category":"env"`) and thrown
+  errors skip the retry and route to a human.
+- **Per-role model config groundwork** (`models: { implement, verify, fix, classify }`).
 
-**Before:** one `setTimeout` aborted every worker at `issueTimeoutMin` (30m) regardless of whether it
-was productively working or genuinely stuck — the exact "tasks take too long / get killed mid-work"
-failure.
+## Shipped: Phase 1 — Verifier + env contract + type-aware failure routing
 
-**Now:** the worker is killed on **inactivity** (`idleTimeoutSeconds`, sandcastle's native idle
-detection) — the real signal that an agent is stuck or looping — with a generous **absolute cap** as a
-final backstop so a productive long task is never guillotined.
+- **Verifier** (`core/verify.ts`, `.sandcastle/verify-prompt.md`) — a Sonnet agent that runs on the
+  completed feature branch with the host Docker socket bind-mounted. It owns `compose up → fresh DB →
+  exercise every acceptance criterion (agent-browser for UI + direct API calls) → down -v` itself and
+  writes a structured `.afk/verdict.json` (per-criterion pass/fail + evidence). The host stays
+  deterministic: it decides *when* to verify, injects the contract + criteria, reads the verdict,
+  uploads the screenshots, and posts a per-criterion table to the PR.
+- **Env contract** (`verify.*` in config) — `up`/`down`/`dbReset`/`appBoot`/`baseUrl`/`seed`/
+  `secrets`/`backendOnly`/`timeoutSec`, all auto-detected and overridable. **Graceful degradation:**
+  no compose stack, a Windows host, or a stack that won't boot ⇒ the PR is marked *"unverified — test
+  manually,"* never a false green (REDESIGN.md risk §).
+- **Type-aware routing** (`core/classify.ts`, deterministic + unit-tested) — a failing verdict or a
+  merge error is classified and routed: `logic → Fixer loop` (`.sandcastle/fix-prompt.md`),
+  `conflict → Resolver` (`.sandcastle/resolve-prompt.md`), `flaky → one auto re-verify`,
+  `env｜ambiguous → escalate with evidence`. The Verifier emits enough structure to route on without a
+  second LLM call.
+- **Implementer no longer screenshots** — the Verifier owns all visual proof (removes the #1 budget
+  waste). `implement-prompt.md` updated accordingly.
 
-- `idleTimeoutMin` (default **10**) → passed to `sandbox.run({ idleTimeoutSeconds })`.
-- `absoluteTimeoutMin` (default **90**) → the `AbortController` backstop.
-- Legacy `issueTimeoutMin` is still honored as the absolute cap, so existing configs keep working.
-- The escalation message now distinguishes "hit the Nm absolute cap" from "stalled (idle > Nm)".
+## Shipped: Phase 2 — epic / sub-issue feature model
 
-### 2. Bounded self-correction loop (was: any failure escalates immediately)
+- An issue's **epic parent** (`## Parent #N`, already written by `/to-issues`) is its feature.
+  Children land on `feat/<epic#>-<slug>`, one PR per epic, verified before the PR goes ready
+  (`core/planner.ts → deriveFeature`, unit-tested). **No manual milestone juggling** — the linkage
+  `to-issues` already creates *is* the grouping. GitHub milestones remain a legacy fallback;
+  neither ⇒ merge to the base branch.
+- Feature completion is detected from GitHub (no open ready children of the epic remain) to trigger
+  verify + flip the PR from draft to ready.
 
-**Before:** if a worker got stuck on its own code, it wrote `.afk/blocked.json`, the host escalated to
-`ready-for-human` immediately, and the work was skipped — even when one more attempt would have fixed it.
+## Shipped: Phase 3 — `afk watch` daemon
 
-**Now:** the implementer runs inside a bounded retry loop (`maxFixAttempts`, default **1**). When it
-self-declares stuck on its **own code** (or produces nothing at all), the host **re-runs it in the same
-sandbox** — worktree and partial work preserved — with the previous blocker injected as context (the new
-`{{RETRY_NOTE}}` prompt slot). Only after the retries are exhausted does it escalate.
+`core/daemon.ts` — a long-running lifecycle manager over the shared Engine:
 
-Crucially, this is **not** a blanket retry:
-- **Environment** blocks are tagged `"category":"env"` in `blocked.json` and **skip the retry** — agents
-  shouldn't grind on infra they can't fix; that routes straight to a human (correct, per the existing
-  bail philosophy).
-- Thrown errors and timeouts do **not** retry (a hung/aborted run won't benefit from an immediate re-run).
+- **Poll loop** (`pollSeconds`) tops up a **bounded worker pool** (`maxParallel`); as each issue
+  lands it checks epic completeness and launches verify → Fixer-loop → PR.
+- **Rate-aware backoff/auto-resume** — a rate-limit error parks the loop and self-restores when the
+  window passes; no re-invocation.
+- **Restart recovery** — replays the event log and **reconciles against GitHub**: every open `feat/*`
+  draft PR is rebuilt into an in-flight feature (children parsed from its `Closes #N` lines), and a
+  verify interrupted by a crash is re-run.
+- **Control surface** — `pause/resume`, `retry` (re-queue an escalation), `merge` (squash-merge a
+  ready PR), `answer` (record a reply to an agent's question).
 
-This is the deterministic, no-new-infrastructure precursor to the full type-aware routing in the design.
+## Shipped: Phase 4 — local dashboard
 
-### 3. Per-role model config (groundwork)
+`core/server.ts` + `core/dashboard.ts` — a dependency-free `node:http` server the daemon hosts on
+`localhost:<dashboardPort>`:
 
-`afk.config.json` now carries a `models: { implement, verify, fix, classify }` map (subscription
-rate-window friendly — Opus for hard reasoning, lighter models for light roles). The implementer reads
-`models.implement` (falling back to the single `model` knob). `verify`/`fix`/`classify` are recorded for
-the later phases that introduce those roles; **only `implement` is wired today.**
+- Serves a single-file SPA, a JSON snapshot (`/api/state`), a live **SSE** stream (`/api/stream`),
+  and the action endpoints. The server's `reduce()` is the single source of truth — the client
+  re-pulls the snapshot on each event instead of re-implementing the fold.
+- **Views:** daemon status + totals, epic→issue tree with per-node state, running agents (role,
+  target, tokens, live pulse), the needs-human queue, and clarifying questions.
+- **Actions:** one-click merge a ready PR, re-queue an escalation, answer a question, pause/resume.
+  Every action earns its place against "could you just do this in GitHub?"
 
 ---
 
-## Files changed
+## Files
 
-| File | Change |
-|------|--------|
-| `src/run.ts` | Idle + absolute timeout model; bounded self-correction loop around `sandbox.run`; per-role `models.implement`; clearer escalation messages. |
-| `.sandcastle/implement-prompt.md` | New `{{RETRY_NOTE}}` slot; `blocked.json` now carries `"category": "env"｜"code"` so the host knows what to retry vs. escalate. |
-| `.sandcastle/afk.config.json`, `.sandcastle/afk.config.example.json` | New keys: `idleTimeoutMin`, `absoluteTimeoutMin`, `maxFixAttempts`, `models`. |
-| `src/init.mjs` | Generates the new config keys for fresh projects. |
-| `README.md` | Config table + "failures self-correct once, then route to humans" updated to match. |
-| `docs/REDESIGN.md`, `docs/IMPLEMENTATION.md` | The design + this log. |
+| File | Role |
+|------|------|
+| `src/core/engine.ts` | Shared host orchestration: implement → merge (conflict→Resolver) → verify → Fixer-loop → PR, plus all safety nets. |
+| `src/core/config.ts` | Load + resolve `afk.config.json` (one place for every default + the legacy timeout mapping). |
+| `src/core/planner.ts` | Pure issue parsing + epic/milestone feature derivation; `pick()` wraps it with GitHub. |
+| `src/core/classify.ts` | Deterministic failure classification → routing. |
+| `src/core/verify.ts` | Run the Verifier sandbox; read verdict; collect evidence; render the PR table. |
+| `src/core/fix.ts` | Run the Fixer / Resolver agents on the feature branch. |
+| `src/core/state.ts` | Append-only event log + pure `reduce()` → dashboard snapshot + live `Store`. |
+| `src/core/daemon.ts` | The `afk watch` lifecycle manager (poll, pool, backoff, reconcile, actions). |
+| `src/core/server.ts` + `dashboard.ts` | Dashboard HTTP/SSE server + the inline SPA. |
+| `src/core/sh.ts` / `types.ts` | Shared shells + tiny pure helpers / shared types. |
+| `src/run.ts` / `src/watch.ts` | The two thin drivers. |
+| `src/core/*.test.ts` | 22 offline unit tests (planning, routing, state roundtrip, dashboard HTTP/SSE). |
+| `.sandcastle/{implement,verify,fix,resolve}-prompt.md` | The four agent-role prompts. |
+| `.sandcastle/Dockerfile` | Worker image; now also ships the Docker CLI + compose plugin for the Verifier. |
+| `src/init.mjs` | Copies all four prompts; generates the `verify.*` + daemon config keys; auto-detects compose. |
 
 ## How it was verified
 
 - `npm run typecheck` (`tsc --noEmit`, `strict: true`) passes.
-- Relied only on sandcastle APIs confirmed present in `node_modules/@ai-hero/sandcastle/dist/index.d.ts`:
-  `SandboxRunOptions.idleTimeoutSeconds`, and the documented contract that a `Sandbox` handle "remains
-  usable after abort — call `.run()` again" (the basis for re-running in the same sandbox).
-- **Not** exercised against a live repo here (that needs Docker + a target repo + the OAuth token).
-  Phase 0 changes are deliberately confined to control-flow that the typechecker covers and that does
-  not alter the proven merge/rescue/escalate paths.
+- `npm test` — 22 unit tests, all offline (no Docker/GitHub/LLM): planner parsing + feature
+  derivation, failure classification, the state reducer + file roundtrip (restart recovery) + live
+  subscription, and the full dashboard HTTP/SSE/action surface against a stub daemon.
+- The dashboard was rendered in a real browser against sample state and looks correct.
+- Built only against sandcastle APIs confirmed present in `@ai-hero/sandcastle/dist/index.d.ts`
+  (`createSandbox`, `Sandbox.run({ idleTimeoutSeconds, signal })`, the docker provider's `mounts`).
 
----
+## What still needs live validation (Docker + a target repo + the OAuth token)
 
-## Not done yet (and why) — the roadmap continues in `REDESIGN.md`
+These paths are typecheck-clean and designed to degrade safely, but cannot be exercised here:
 
-These need a live Docker + running-app environment to build and validate safely, so they are **not**
-implemented blind. Build order from the design:
+- **Verifier socket access.** The Verifier runs `docker compose` against the host daemon via the
+  bind-mounted socket. The container user (`agent`, uid 1000) needs permission to that socket — on a
+  host where it is group-owned, the worker may need to join that gid (or the verify step degrades to
+  "unverified"). Validate on a Linux host with a dockerized sample app and tune if needed.
+- **compose-from-branch realism** — fresh-DB reset, app-boot detection, and seed-through-the-app for
+  a real project's stack.
+- **Daemon longevity** — multi-hour polling, real rate-limit backoff/auto-resume, and restart
+  reconciliation against a live PR set.
 
-- **Phase 1 — Verifier + env contract.** Dedicated Verifier agent (agent-browser for UI + direct API
-  calls), per-feature verification, `docker compose -p verify_<feature>` from the branch with a fresh
-  isolated DB, evidence posted to the PR. *(The implementer keeps its optional screenshot step until the
-  Verifier exists — dropping it now would remove all visual proof with nothing to replace it.)*
-- **Phase 2 — epic + sub-issue feature model** (replace milestone grouping).
-- **Phase 3 — `afk watch` daemon** (continuous lifecycle manager + state store + rate-aware backoff).
-- **Phase 4 — local dashboard** (monitor + merge/retry/answer actions over the daemon's state/stream).
+## Roadmap (open second-order items from REDESIGN.md)
 
-Type-aware failure routing (conflict→resolver, flaky→re-run, ambiguous→escalate-now) lands with Phase 1,
-where the Verifier creates failures rich enough to route on.
+- Clarifying-question *protocol*: the dashboard renders + answers questions, but agents don't yet have
+  an in-sandbox channel to *raise* one (today they escalate). Wiring `.afk/question.json` → a pause →
+  the dashboard answer → resume is the next increment.
+- SQLite state store (vs. the current JSONL event log) if the log grows large.
+- Multi-repo (one daemon, many repos) and webhook-triggered polling.
