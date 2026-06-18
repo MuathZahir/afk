@@ -2,8 +2,18 @@
 # Generic across projects — per-project deps install at sandbox start via afk.config.json "setup".
 FROM node:22-bookworm
 
-# System deps: jq (afk-gate.sh), ffmpeg (stitches screenshots into the demo GIF)
+# System deps: jq (verdict parsing), ffmpeg (stitches verifier screenshots into the demo GIF)
 RUN apt-get update && apt-get install -y git curl jq ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI + compose plugin — the Verifier runs `docker compose up/down` against the host daemon
+# (the host socket is bind-mounted at verify time). Client only; no daemon runs in the container.
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+    > /etc/apt/sources.list.d/docker.list \
+  && apt-get update && apt-get install -y docker-ce-cli docker-compose-plugin \
   && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (used by skills that read docs/issues if you grant it)
