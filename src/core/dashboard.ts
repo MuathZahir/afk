@@ -67,7 +67,7 @@ export const SPA = /* html */ `<!doctype html>
   .agent .tok { font:600 11px var(--mono); color:var(--dim); }
   .agent .log { margin-top:8px; max-height:168px; overflow-y:auto; background:var(--bg); border:1px solid var(--line);
     border-radius:8px; padding:7px 10px; font:11px/1.55 var(--mono); color:var(--dim); white-space:pre-wrap; word-break:break-word; }
-  .agent .log:empty { display:none; }
+  .agent .log .muted { color:var(--faint); font-style:italic; }
   button.stop { background:#221016; border-color:#5e1f2c; color:var(--bad); font-size:11px; padding:4px 10px; } button.stop:hover { border-color:var(--bad); }
   .live-dot { width:7px; height:7px; border-radius:50%; background:var(--good); animation:pulse 1.6s infinite; flex:none; }
   .esc { padding:11px 14px; border-bottom:1px solid var(--line); }
@@ -109,6 +109,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"
 let state = null, paused = false;
 
 function badgeClass(s){ return "b-" + String(s).replace(/[^a-z]/g,""); }
+function featLabel(key){ const m=String(key).match(/^epic-(\\d+)$/); return m ? "Epic #"+m[1] : String(key).replace(/^ms-/,"").replace(/-/g," "); }
 function render(){
   if(!state) return;
   const d = state.daemon || {};
@@ -122,9 +123,16 @@ function render(){
   $("poll").textContent = state.lastPoll ? ("last poll: "+state.lastPoll.ready+" ready, "+state.lastPoll.picked+" picked") : "";
 
   // features + their issues
-  const feats = Object.values(state.features||{}).sort((a,b)=>a.title.localeCompare(b.title));
+  const featMap = Object.assign({}, state.features||{});
   const issuesByFeature = {};
-  for(const i of Object.values(state.issues||{})){ (issuesByFeature[i.feature] = issuesByFeature[i.feature]||[]).push(i); }
+  for(const i of Object.values(state.issues||{})){
+    if(!i.feature) continue;
+    (issuesByFeature[i.feature] = issuesByFeature[i.feature]||[]).push(i);
+    // Defensive: an in-flight epic child whose feature node hasn't been emitted yet still gets a node,
+    // so it never falls into the gap between "Features" and "Loose issues".
+    if(!featMap[i.feature]) featMap[i.feature] = { key:i.feature, title:featLabel(i.feature), state:"building" };
+  }
+  const feats = Object.values(featMap).sort((a,b)=>String(a.title).localeCompare(String(b.title)));
   $("features").innerHTML = feats.length ? feats.map(f=>{
     const kids = (issuesByFeature[f.key]||[]).sort((a,b)=>a.number-b.number);
     const v = f.verdict ? \`<span class="sub">\${f.verdict.passed}/\${f.verdict.total} criteria</span>\` : "";
@@ -150,7 +158,8 @@ function render(){
 
   const agents = Object.values(state.agents||{}).filter(a=>a.active).sort((a,b)=>a.started.localeCompare(b.started));
   $("agents").innerHTML = agents.length ? agents.map(a=>{
-    const log = (a.log||[]).slice(-14).map(esc).join("\\n");
+    const lines = (a.log||[]).slice(-14);
+    const log = lines.length ? lines.map(esc).join("\\n") : '<span class="muted">waiting for output… (the worker may still be installing deps)</span>';
     return \`<div class="agent">
       <div class="hdr"><span class="live-dot"></span><span class="role \${esc(a.role)}">\${esc(a.role)}</span>
         <div class="what"><div class="t">\${esc(a.target)}</div></div>

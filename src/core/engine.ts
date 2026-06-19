@@ -200,6 +200,9 @@ export class Engine {
     const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
     await this.withGitLock(() => this.ensureFeatureBranch(p.feature));
     this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "implementing" });
+    // Surface the feature node immediately (with its real title) so an in-flight epic child shows up
+    // in the tree right away, not only once something merges.
+    if (p.featureKey) this.emit({ type: "feature-state", feature: p.featureKey, title: p.featureTitle ?? p.featureKey, state: "building" });
     const agentId = `impl-${p.number}`;
     this.emit({ type: "agent", id: agentId, role: "implement", target: `#${p.number}`, phase: "start" });
 
