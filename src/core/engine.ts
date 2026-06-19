@@ -93,6 +93,17 @@ export class Engine {
     try { return Number(git(["rev-list", "--count", `${base}..${branch}`]).trim()) > 0; } catch { return false; }
   }
 
+  /**
+   * Tracked, uncommitted changes in the host working tree. AFK lands work by checking out the feature
+   * branch and merging *in this working tree*, so any such changes will make the merge refuse to
+   * start. Untracked files are ignored (they don't block checkout/merge). The driver refuses to run
+   * when this is non-empty, with a clear message — far better than failing mid-merge.
+   */
+  hostTreeChanges(): string[] {
+    try { return git(["status", "--porcelain", "--untracked-files=no"]).split("\n").map((s) => s.trim()).filter(Boolean); }
+    catch { return []; }
+  }
+
   private ensureFeatureBranch(fb: string): void {
     if (fb === this.cfg.baseBranch || this.featureBranchReady.has(fb)) return;
     const localExists = git(["branch", "--list", fb]).trim() !== "";
@@ -327,16 +338,20 @@ export class Engine {
       }
 
       // ── merge issue branch → feature branch (serialized); conflict → Resolver ──
-      let conflict = await this.tryMerge(p);
-      if (conflict) {
+      const merge = await this.tryMerge(p);
+      let failReason: string | null = null;
+      if (merge === "conflict") {
         this.log(`  ⚔️  #${p.number}: merge conflict — routing to Resolver.`);
-        const resolved = await this.tryResolve(p, issueJson);
-        conflict = !resolved;
+        if (!(await this.tryResolve(p, issueJson)))
+          failReason = `Merge conflict with \`${p.feature}\` the Resolver couldn't reconcile. Needs a human.`;
+      } else if (merge === "failed") {
+        failReason = `Couldn't merge \`${p.branch}\` into \`${p.feature}\`. The host repo's working tree likely has uncommitted changes — AFK needs a clean tree to land work. Commit or stash them, then re-queue.`;
       }
-      if (conflict) {
-        preserve = this.escalate(p.number, p.title, `Merge conflict with \`${p.feature}\` the Resolver couldn't reconcile. Needs a human.`, "", workBranch);
-        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "conflict" });
-        return done({ num: p.number, title: p.title, status: "conflict", feature: p.feature });
+      if (failReason) {
+        const st = merge === "conflict" ? "conflict" : "error";
+        preserve = this.escalate(p.number, p.title, failReason, "", workBranch);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: st });
+        return done({ num: p.number, title: p.title, status: st, feature: p.feature });
       }
       landed = true;
 
@@ -361,14 +376,24 @@ export class Engine {
     }
   }
 
-  private tryMerge(p: Picked): Promise<boolean> {
+  /** Merge the issue branch into its feature branch. Never throws — returns the outcome so the caller
+   *  routes it (conflict → Resolver, failed → escalate) instead of crashing the run. */
+  private tryMerge(p: Picked): Promise<"ok" | "conflict" | "failed"> {
     return this.withGitLock(() => {
-      git(["checkout", p.feature]);
-      try { git(["merge", "--no-ff", p.branch, "-m", `feat: ${p.title} (#${p.number})`]); return false; }
+      try { git(["checkout", p.feature]); }
       catch (e) {
-        const c = classifyError(String((e as Error)?.message ?? e));
-        git(["merge", "--abort"]);
-        return c.kind === "conflict";
+        this.log(`  ⚠️  #${p.number}: couldn't switch to ${p.feature} (host working tree not clean?): ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+        return "failed";
+      }
+      try {
+        git(["merge", "--no-ff", p.branch, "-m", `feat: ${p.title} (#${p.number})`]);
+        return "ok";
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        // A merge that refused to *start* (dirty tree) leaves no MERGE_HEAD — `--abort` would throw,
+        // so guard it. Only a real conflict leaves a merge in progress worth aborting.
+        try { git(["merge", "--abort"]); } catch { /* nothing to abort */ }
+        return classifyError(msg).kind === "conflict" ? "conflict" : "failed";
       }
     });
   }

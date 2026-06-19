@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import { loadConfig } from "./core/config.js";
 import { Engine } from "./core/engine.js";
 import { pick } from "./core/planner.js";
-import { isRateLimit } from "./core/sh.js";
+import { dirtyTreeMessage, isRateLimit } from "./core/sh.js";
 import { Feature, Result } from "./core/types.js";
 
 // ── bounded-concurrency pool ──────────────────────────────────────────────────
@@ -26,6 +26,8 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
   const cfg = loadConfig();
   console.log(`AFK starting on ${cfg.nwo} — base=${cfg.baseBranch}, parallel=${cfg.maxParallel}, cap=${cfg.maxIssues}\n`);
   const engine = new Engine(cfg);
+  const dirty = engine.hostTreeChanges();
+  if (dirty.length) { console.error(dirtyTreeMessage(dirty)); process.exit(1); }
   engine.cleanStartup();
 
   const results: Result[] = [];

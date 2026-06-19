@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { Resolved } from "./config.js";
 import { Engine } from "./engine.js";
 import { pick } from "./planner.js";
-import { gh, isRateLimit, slug } from "./sh.js";
+import { dirtyTreeMessage, gh, isRateLimit, slug } from "./sh.js";
 import { Feature, Picked } from "./types.js";
 import { Store } from "./state.js";
 
@@ -44,6 +44,12 @@ export class Daemon {
   // ── lifecycle ──────────────────────────────────────────────────────────────
   async start(): Promise<void> {
     this.store.append({ type: "daemon", status: "starting" });
+    const dirty = this.engine.hostTreeChanges();
+    if (dirty.length) {
+      console.error(dirtyTreeMessage(dirty));
+      this.store.append({ type: "daemon", status: "stopped", note: `working tree has ${dirty.length} uncommitted change(s) — commit/stash, then restart` });
+      return;
+    }
     this.engine.cleanStartup();
     await this.reconcile();
     this.store.append({ type: "daemon", status: "polling" });
