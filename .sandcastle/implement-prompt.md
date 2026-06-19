@@ -8,6 +8,7 @@ GitHub access, so everything you need is here:
 <issue>
 {{ISSUE_JSON}}
 </issue>
+{{RETRY_NOTE}}
 
 # GROUND RULES
 
@@ -31,11 +32,11 @@ GitHub access, so everything you need is here:
 
 # STEPS
 
-> **Ordering is deliberate: TEST and COMMIT come BEFORE the optional screenshots.** The host merges
-> any branch you commit to — so committing is the only thing that makes your work land. Screenshots
-> are nice-to-have evidence with *zero* effect on the merge. Do the merge-critical steps first so
-> that even if the screenshot step explodes (missing browser, GPU-less renderer, timeout), your work
-> still lands. **An agent that chases screenshots before committing throws away everything it built.**
+> **You implement and commit. You do NOT take screenshots or run the app end-to-end** — a dedicated
+> **Verifier** brings the whole feature up from the branch's stack and proves it in the browser once
+> all of the feature's issues have landed. That removes the single biggest budget-waste (an agent
+> chasing screenshots before committing). Your one job that makes work land is **committing**. Do the
+> merge-critical steps; leave visual proof to the Verifier.
 
 1. **Explore** the repo to understand the code paths this issue touches. Read the relevant
    tests and the surrounding modules. Use the project's own conventions.
@@ -72,25 +73,9 @@ GitHub access, so everything you need is here:
    pass — this is the most important step; never end your turn with uncommitted work.** The host
    merges from your commit; uncommitted work cannot be merged.
 
-7. **OPTIONAL — live proof, STRICTLY time-boxed.** Only if the issue changes something a user can
-   see, and only after steps 5–6 are done. This is bonus evidence, **not** a merge requirement.
-   - **Hard cap: ONE attempt, ≤2 minutes total. The moment anything environmental gets in the way —
-     dev server won't boot, browser/native binary missing, GPU/WebGL/renderer errors, a download
-     that stalls — STOP immediately, skip the rest, and go to step 8.** Do **not** retry, do **not**
-     reinstall browsers, do **not** hand-launch chrome with workaround flags. Note
-     `visual unverified (env): <one line>` in `.afk/summary.md` and move on. Your committed work is
-     complete regardless. Grinding here is the #1 way agents waste their whole budget.
-   - Start the app from `package.json` (e.g. `npm run dev`) in the background; note the port.
-   - Use the **expect skill** (`mcp__expect__open`, `mcp__expect__playwright`,
-     `mcp__expect__screenshot`) to step through the acceptance criteria like a user. Save each
-     screenshot to `.afk/shots/NN-label.png` (zero-padded, e.g. `01-empty-form.png`).
-   - If you captured shots, stitch the GIF: `bash .sandcastle/lib/make-gif.sh`.
-   - Write **`.afk/e2e.json`**: `{ "ok": true, "note": "what you verified" }` if it works. It's
-     informational — the screenshots/GIF embed in the report. If your feature is genuinely broken,
-     don't commit it as done — write `.afk/blocked.json` (see below) so it routes to a human.
-   - Backend-only / nothing visual → skip this whole step (no `.afk/e2e.json`).
-
-8. Output `<promise>COMPLETE</promise>`.
+7. Output `<promise>COMPLETE</promise>`. (No screenshots, no dev-server, no end-to-end run — the
+   Verifier owns all of that once the feature is complete. If your change is visual, just make sure
+   the acceptance criteria in the issue are implemented; the Verifier will exercise them.)
 
 # KEEP YOUR CHECKS SMALL AND IN THE FOREGROUND — NEVER POLL IN THE BACKGROUND
 
@@ -104,9 +89,8 @@ never the full suite.
   Wait for them to return; read the output directly.
 - Do **NOT** start anything as a background task and poll a `/tmp/*.out` file. Do **NOT** `sleep` in
   a loop. Do **NOT** run the full `npm run test --workspaces` — nobody needs it; just your scoped tests.
-- **Commit the instant your own tests pass (step 6) — before any optional/visual work.** Never end
-  your turn with uncommitted changes. A committed imperfect change survives; an uncommitted perfect
-  one does not.
+- **Commit the instant your own tests pass (step 6).** Never end your turn with uncommitted changes.
+  A committed imperfect change survives; an uncommitted perfect one does not.
 
 # BAIL FAST ON ENVIRONMENT PROBLEMS — DO NOT RABBIT-HOLE
 
@@ -122,17 +106,17 @@ time and tokens is grinding on infrastructure that isn't your fault. Don't.
   away? If yes, it's environmental.
 
 **Scope:** bail is for when the environment blocks the **core work** — you can't install, can't run
-your tests, the repo won't build at all. It is **NOT** for when only the **screenshot/dev-server**
-step is blocked — that path is handled in step 7 (skip the visual, keep going). If you can run your
-own tests and they pass, you are NOT blocked — commit and finish normally.
+your tests, the repo won't build at all. If you can run your own tests and they pass, you are NOT
+blocked — commit and finish normally.
 
 **When the core work is environmentally blocked, bail after AT MOST one or two quick attempts**
 (a few minutes, not an hour). To bail:
 
 1. Commit whatever real progress you made (specific paths only — never `node_modules`/lockfiles).
-2. Write `.afk/blocked.json`:
+2. Write `.afk/blocked.json` with **`"category": "env"`** — this tells the host it's an environment
+   problem, not your code, so it routes straight to a human and does **not** waste a retry on it:
    ```json
-   { "reason": "one line — what's broken", "detail": "what you saw + what you tried" }
+   { "category": "env", "reason": "one line — what's broken", "detail": "what you saw + what you tried" }
    ```
 3. Write the same into `.afk/summary.md`.
 4. Output `<promise>COMPLETE</promise>`.
@@ -142,9 +126,25 @@ thrown away. Bailing early on a tooling problem is the **correct, expected** out
 hour and a chunk of the token budget fixing someone else's broken install is a failure, even if it
 eventually works.
 
+# IF YOU NEED A PRODUCT DECISION — ASK, DON'T GUESS
+
+If the issue is **genuinely ambiguous about what to build** (a real product/UX/data decision the
+acceptance criteria don't settle), don't guess and don't escalate the whole issue. Ask one crisp
+question:
+
+1. Commit any safe partial work (specific paths only).
+2. Write `.afk/question.json`: `{ "question": "the one decision you need", "detail": "the options you see + your recommendation" }`.
+3. Output `<promise>COMPLETE</promise>`.
+
+The host posts your question to the issue and pauses it; when a human answers, AFK re-runs this
+issue with their answer already in the issue comments. **Only for genuine decisions** — never for
+something you can resolve by reading the code, and never for environment/tooling problems (those are
+the bail path below). One question, not a conversation.
+
 # IF YOU'RE STUCK ON YOUR OWN CODE
 
 If the bug *is* yours but you genuinely can't get your tests green (hard or underspecified issue),
-write what blocked you into `.afk/summary.md` **and `.afk/blocked.json`** (so the host routes it to
+write what blocked you into `.afk/summary.md` **and `.afk/blocked.json` with `"category": "code"`**
+(so the host gives the work one more automatic attempt with your notes as context, then routes it to
 a human instead of merging it), commit what you have, and output `<promise>COMPLETE</promise>`. That
 is a fine outcome — far better than committing code you know is broken as if it were done.

@@ -82,10 +82,11 @@ if (!dockerUp) {
 step("Harness");
 const dstSc = path.join(TARGET, ".sandcastle");
 fs.mkdirSync(path.join(dstSc, "lib"), { recursive: true });
-fs.copyFileSync(path.join(AFK, ".sandcastle", "implement-prompt.md"), path.join(dstSc, "implement-prompt.md"));
+const PROMPTS = ["implement-prompt.md", "verify-prompt.md", "fix-prompt.md", "resolve-prompt.md"];
+for (const p of PROMPTS) fs.copyFileSync(path.join(AFK, ".sandcastle", p), path.join(dstSc, p));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "Dockerfile"), path.join(dstSc, "Dockerfile"));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "lib", "make-gif.sh"), path.join(dstSc, "lib", "make-gif.sh"));
-ok("copied implement-prompt.md, Dockerfile, lib/make-gif.sh");
+ok(`copied ${PROMPTS.join(", ")}, Dockerfile, lib/make-gif.sh`);
 
 // ── 4. auto-generate config from package.json ─────────────────────────────────
 step("Config");
@@ -100,13 +101,23 @@ if (fs.existsSync(cfgPath)) {
     : fs.existsSync(path.join(TARGET, "yarn.lock")) ? "yarn"
       : "rm -f package-lock.json && npm install --no-audit --no-fund --prefer-offline && git checkout -- package-lock.json 2>/dev/null; true";
   const base = (() => { try { return shq("git", ["-C", TARGET, "symbolic-ref", "--short", "HEAD"]); } catch { return "main"; } })();
+  const hasCompose = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
+    .some((f) => fs.existsSync(path.join(TARGET, f)));
   const cfg = {
-    baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5, issueTimeoutMin: 30, model: "opus",
+    baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5,
+    idleTimeoutMin: 10, absoluteTimeoutMin: 90, maxFixAttempts: 1,
+    model: "opus",
+    models: { implement: "opus", verify: "sonnet", fix: "opus", classify: "haiku" },
     setup,
+    // Phase 1 — verification env contract. Auto-detected; every field is overridable. With no
+    // compose stack the Verifier marks features "unverified" (never a false-green) instead of failing.
+    verify: { enabled: hasCompose, backendOnly: false, timeoutSec: 1200, baseUrl: "", up: "", down: "", dbReset: "", appBoot: "", seed: "", secrets: "" },
+    // Phase 3/4 — `afk watch` daemon + dashboard.
+    pollSeconds: 60, dashboardPort: 7777,
     labels: { ready: "ready-for-agent", human: "ready-for-human" },
   };
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
-  ok(`generated afk.config.json  (base=${base})`);
+  ok(`generated afk.config.json  (base=${base}, verify=${hasCompose ? "on (compose detected)" : "off — no compose stack"})`);
   console.log("  → glance at it; `setup` is auto-detected and may need a tweak for monorepos.");
 }
 
@@ -117,7 +128,7 @@ const cur = fs.existsSync(gi) ? fs.readFileSync(gi, "utf8") : "";
 const add = want.filter((w) => !cur.split("\n").some((l) => l.trim() === w));
 if (add.length) fs.appendFileSync(gi, `\n# AFK\n${add.join("\n")}\n`);
 
-console.log(`\n✅ Done. The loop:\n    cd ${path.relative(process.cwd(), TARGET) || "."}\n    /grill-with-docs → /to-issues (assign a milestone per feature) → afk run\n`);
+console.log(`\n✅ Done. The loop:\n    cd ${path.relative(process.cwd(), TARGET) || "."}\n    /grill-with-docs → /to-issues (epic parent + sub-issues) → afk run   (or: afk watch)\n`);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function readEnv(file) {

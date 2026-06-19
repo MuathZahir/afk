@@ -8,3 +8,7 @@ node_modules/
 # run artifacts
 .afk/
 AFK-REPORT.md
+
+# AFK
+.sandcastle/logs/
+.sandcastle/worktrees/
