@@ -233,6 +233,9 @@ export class Engine {
     let preserve = false;
     let landed = false;
     const done = (r: Result): Result => { this.emit({ type: "agent", id: agentId, role: "implement", target: `#${p.number}`, phase: "end" }); return r; };
+    // The longest, quietest phase: bring up the container + run `setup` (npm install) BEFORE the
+    // agent produces any stream output. Tell the dashboard so it isn't a silent "waiting for output".
+    this.activity(agentId, `🛠 starting sandbox + running setup (\`${this.cfg.setup}\`)${process.platform === "win32" ? " — note: dep caching is off on Windows, so first install is slow" : ""}…`);
     try {
       sandbox = await sandcastle.createSandbox({
         sandbox: dockerSandbox({
@@ -244,8 +247,9 @@ export class Engine {
         }),
         branch: p.branch,
         baseBranch: p.feature,
-        hooks: { sandbox: { onSandboxReady: [{ command: this.cfg.setup }] } },
+        hooks: { sandbox: { onSandboxReady: [{ command: this.cfg.setup, timeoutMs: this.cfg.absoluteTimeoutMs }] } },
       });
+      this.activity(agentId, "✅ setup done — launching the agent");
 
       const afk = path.join(sandbox.worktreePath, ".afk");
       const ac = new AbortController();

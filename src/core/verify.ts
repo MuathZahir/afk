@@ -54,6 +54,7 @@ export async function verifyFeature(
   const needsDeps = !!cfg.verify.appBoot;
   let sandbox: sandcastle.Sandbox | undefined;
   try {
+    opts.onActivity?.(`🛠 starting verify sandbox${needsDeps ? " + setup" : ""}…`);
     sandbox = await sandcastle.createSandbox({
       sandbox: dockerSandbox({
         imageName: WORKER_IMAGE,
@@ -69,8 +70,9 @@ export async function verifyFeature(
       }),
       branch: feature.branch,
       baseBranch: feature.branch, // branch already exists; baseBranch is ignored
-      ...(needsDeps ? { hooks: { sandbox: { onSandboxReady: [{ command: cfg.setup }] } } } : {}),
+      ...(needsDeps ? { hooks: { sandbox: { onSandboxReady: [{ command: cfg.setup, timeoutMs: cfg.absoluteTimeoutMs }] } } } : {}),
     });
+    opts.onActivity?.("✅ verify sandbox ready — bringing the stack up");
 
     const afk = path.join(sandbox.worktreePath, ".afk");
     {

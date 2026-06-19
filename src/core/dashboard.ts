@@ -319,7 +319,7 @@ function render(){
     return \`<div class="agent">
       <div class="hdr"><span class="live-dot"></span><span class="role \${esc(a.role)}">\${esc(a.role)}</span>
         <div class="what"><div class="t">\${esc(a.target)}</div></div>
-        <div class="meta">\${tok}<span>\${rel(a.started)}</span>
+        <div class="meta">\${tok}<span class="el" data-since="\${esc(a.started)}">\${rel(a.started)}</span>
         <button class="stop" onclick="stop('\${esc(a.id)}')">Stop</button></div></div>
       <div class="log" id="log-\${esc(a.id)}">\${log}</div></div>\`;
   }).join("") : '<div class="empty"><span class="big">⏻</span>Idle — no agents running.</div>';
@@ -365,6 +365,8 @@ ev.addEventListener("event", (m)=>{
   clearTimeout(pending); pending=setTimeout(refresh,180);
 });
 ev.onerror = ()=>{ $("status").textContent="reconnecting…"; $("status").className="pill"; };
+// Tick the agent elapsed labels every second without a full re-render (so a half-typed answer survives).
+setInterval(()=>{ for(const el of document.querySelectorAll(".el")) el.textContent = rel(el.dataset.since); }, 1000);
 refresh();
 </script>
 </body>

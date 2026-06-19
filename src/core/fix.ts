@@ -31,6 +31,7 @@ async function runOnFeature(
 ): Promise<AgentOutcome> {
   let sandbox: sandcastle.Sandbox | undefined;
   try {
+    opts.onActivity?.(`🛠 starting sandbox + running setup (\`${cfg.setup}\`)…`);
     sandbox = await sandcastle.createSandbox({
       sandbox: dockerSandbox({
         imageName: WORKER_IMAGE,
@@ -41,8 +42,9 @@ async function runOnFeature(
       }),
       branch: feature,
       baseBranch: feature, // already exists
-      hooks: { sandbox: { onSandboxReady: [{ command: cfg.setup }] } },
+      hooks: { sandbox: { onSandboxReady: [{ command: cfg.setup, timeoutMs: cfg.absoluteTimeoutMs }] } },
     });
+    opts.onActivity?.("✅ setup done — launching the agent");
     const afk = path.join(sandbox.worktreePath, ".afk");
     try { fs.rmSync(path.join(afk, "blocked.json"), { force: true }); } catch { /* none */ }
     const r = await sandbox.run({
