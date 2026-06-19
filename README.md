@@ -17,7 +17,8 @@ Two ways to run it:
 - **`afk run`** — drain the queue once, then exit. Great for a "work the backlog while I'm out" pass.
 - **`afk watch`** — a continuous daemon with a **local dashboard** (`localhost:7777`): it keeps
   polling, runs the full implement → verify → fix loop, backs off and auto-resumes on rate limits,
-  and lets you merge a ready PR, re-queue an escalation, or answer an agent's question with one click.
+  and lets you watch each agent's **live transcript** (what it's saying + every tool call), **stop**
+  a stuck worker, merge a ready PR, re-queue an escalation, or answer an agent's question — one click.
 
 Built on **[Sandcastle](https://github.com/mattpocock/sandcastle)** (the isolation / worktree /
 merge engine — used as a library, not forked) and the **[Matt Pocock skills](https://github.com/mattpocock)**

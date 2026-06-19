@@ -18,7 +18,7 @@ import * as sandcastle from "@ai-hero/sandcastle";
 import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Resolved } from "./config.js";
 import { Feature, Picked, Result, Verdict } from "./types.js";
-import { gh, git, isRateLimit, readJson, readText, slug } from "./sh.js";
+import { gh, git, isRateLimit, readJson, readText, slug, streamLogging } from "./sh.js";
 import { classifyError, classifyVerdict } from "./classify.js";
 import { verifyFeature, verdictMarkdown } from "./verify.js";
 import { runFixer, runResolver } from "./fix.js";
@@ -30,6 +30,8 @@ const RELEASE_TAG = "afk-artifacts";
 export type EngineHooks = {
   log?: (msg: string) => void;
   emit?: (e: EventBody) => void;
+  /** A live agent-stream line (assistant text / tool call) for the dashboard transcript. */
+  activity?: (agentId: string, line: string) => void;
 };
 
 export class Engine {
@@ -38,6 +40,9 @@ export class Engine {
   private releaseReady = false;
   /** Live features keyed by branch — tracks which issues landed, for the PR + verify trigger. */
   readonly features = new Map<string, Feature>();
+  /** Abort controller per running agent id, so the dashboard can stop a single worker. */
+  private controllers = new Map<string, AbortController>();
+  private stoppedIds = new Set<string>();
 
   constructor(private cfg: Resolved, private hooks: EngineHooks = {}) {
     for (const d of [cfg.npmCacheDir, cfg.nmCacheDir]) fs.mkdirSync(d, { recursive: true });
@@ -45,6 +50,26 @@ export class Engine {
 
   private log(m: string) { (this.hooks.log ?? console.log)(m); }
   private emit(e: EventBody) { this.hooks.emit?.(e); }
+  private activity(id: string, line: string) { this.hooks.activity?.(id, line); }
+
+  /** Register an agent's AbortController under its id for the run's lifetime, then clean up. */
+  private async withController<T>(agentId: string, timeoutMs: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error(`${agentId} hit the ${Math.round(timeoutMs / 60000)}m cap`)), timeoutMs);
+    this.controllers.set(agentId, ac);
+    try { return await fn(ac.signal); }
+    finally { clearTimeout(timer); this.controllers.delete(agentId); }
+  }
+
+  /** Stop one running agent from the dashboard. Its run aborts; partial work is preserved + escalated. */
+  stopAgent(id: string): boolean {
+    const ac = this.controllers.get(id);
+    if (!ac) return false;
+    this.stoppedIds.add(id);
+    ac.abort(new Error("Stopped by you from the dashboard."));
+    this.log(`  ⏹  ${id}: stopped by user.`);
+    return true;
+  }
 
   // ── serialized host-side git writes (parallel workers share ONE host repo) ──
   private withGitLock<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -199,6 +224,7 @@ export class Engine {
       const afk = path.join(sandbox.worktreePath, ".afk");
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(new Error(`issue #${p.number} hit the ${this.cfg.absoluteTimeoutMin}m absolute cap`)), this.cfg.absoluteTimeoutMs);
+      this.controllers.set(agentId, ac); // so the dashboard can stop this worker
       let commits = 0;
       let blocked: any = null;
       try {
@@ -219,6 +245,7 @@ export class Engine {
             promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, BRANCH: p.branch, ISSUE_JSON: issueJson, RETRY_NOTE: retryNote },
             idleTimeoutSeconds: this.cfg.idleTimeoutSec,
             signal: ac.signal,
+            logging: streamLogging(path.join(".afk", "logs", `${agentId}${attempt ? `-r${attempt}` : ""}.log`), (line) => this.activity(agentId, line)),
           });
           commits = r.commits.length;
           blocked = readJson(path.join(afk, "blocked.json"));
@@ -232,15 +259,18 @@ export class Engine {
       } catch (e) {
         if (isRateLimit(e)) throw e;
         if (sandbox && !this.branchAhead(p.branch, p.feature)) this.rescueUncommitted(sandbox.worktreePath, p);
-        const reason = ac.signal.aborted
+        const userStopped = this.stoppedIds.has(agentId);
+        const reason = userStopped
+          ? "Stopped by you from the dashboard — partial work preserved."
+          : ac.signal.aborted
           ? `Worker hit the ${this.cfg.absoluteTimeoutMin}m absolute cap.`
           : `Worker stalled (idle > ${this.cfg.idleTimeoutSec / 60}m) or errored before finishing.`;
         const wb = this.branchAhead(p.branch, p.feature) ? p.branch : undefined;
-        preserve = this.escalate(p.number, p.title, reason, `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, wb);
-        const status = ac.signal.aborted ? "timeout" : "error";
+        preserve = this.escalate(p.number, p.title, reason, userStopped ? "" : `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, wb);
+        const status: "stopped" | "timeout" | "error" = userStopped ? "stopped" : ac.signal.aborted ? "timeout" : "error";
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: status });
         return done({ num: p.number, title: p.title, status, feature: p.feature });
-      } finally { clearTimeout(timer); }
+      } finally { clearTimeout(timer); this.controllers.delete(agentId); }
 
       const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
       const question = readJson(path.join(afk, "question.json")) as { question?: string; detail?: string } | null;
@@ -326,16 +356,19 @@ export class Engine {
   private async tryResolve(p: Picked, issueJson: string): Promise<boolean> {
     // Host must be off the feature branch while the Resolver's worktree holds it.
     await this.withGitLock(() => { try { git(["checkout", this.cfg.baseBranch]); } catch { /* ignore */ } });
-    this.emit({ type: "agent", id: `resolve-${p.number}`, role: "resolve", target: `#${p.number}`, phase: "start" });
+    const id = `resolve-${p.number}`;
+    this.emit({ type: "agent", id, role: "resolve", target: `#${p.number}`, phase: "start" });
     try {
-      const out = await runResolver(this.cfg, p.feature, p.branch, issueJson);
+      const out = await this.withController(id, this.cfg.absoluteTimeoutMs, (signal) =>
+        runResolver(this.cfg, p.feature, p.branch, issueJson, { signal, onActivity: (l) => this.activity(id, l) }),
+      );
       // Resolved iff the resolver committed the merge and didn't bail.
       return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.cfg.baseBranch);
     } catch (e) {
       this.log(`  ⚠️  Resolver failed for #${p.number}: ${(e as Error)?.message ?? e}`);
       return false;
     } finally {
-      this.emit({ type: "agent", id: `resolve-${p.number}`, role: "resolve", target: `#${p.number}`, phase: "end" });
+      this.emit({ type: "agent", id, role: "resolve", target: `#${p.number}`, phase: "end" });
     }
   }
 
@@ -396,14 +429,17 @@ export class Engine {
     let unverifiedReason: string | null = null;
     let evidenceMd = "";
 
+    const verifyId = `verify-${feature.key}`;
     // verify → (flaky? one re-run) → (logic? fix loop) → settle
     for (let fixAttempt = 0; fixAttempt <= this.cfg.maxFixAttempts; fixAttempt++) {
-      this.emit({ type: "agent", id: `verify-${feature.key}`, role: "verify", target: feature.title, phase: "start" });
-      const vr = await verifyFeature(this.cfg, feature, issuesJson).catch((e) => {
+      this.emit({ type: "agent", id: verifyId, role: "verify", target: feature.title, phase: "start" });
+      const vr = await this.withController(verifyId, (this.cfg.verify.timeoutSec ?? 1200) * 1000, (signal) =>
+        verifyFeature(this.cfg, feature, issuesJson, { signal, onActivity: (l) => this.activity(verifyId, l) }),
+      ).catch((e) => {
         if (isRateLimit(e)) throw e;
-        return { kind: "unverified", reason: `Verifier errored: ${(e as Error)?.message ?? e}` } as const;
+        return { kind: "unverified", reason: `Verifier ${this.stoppedIds.has(verifyId) ? "stopped by you" : "errored"}: ${(e as Error)?.message ?? e}` } as const;
       });
-      this.emit({ type: "agent", id: `verify-${feature.key}`, role: "verify", target: feature.title, phase: "end" });
+      this.emit({ type: "agent", id: verifyId, role: "verify", target: feature.title, phase: "end" });
 
       if (vr.kind === "unverified") { unverifiedReason = vr.reason; break; }
       verdict = vr.verdict;
@@ -418,10 +454,13 @@ export class Engine {
       if (fixAttempt >= this.cfg.maxFixAttempts) break;          // out of attempts
       if (cls.kind === "flaky") { this.log(`  ↻ flaky — one automatic re-verify.`); continue; }
       // logic → Fixer
+      const fixId = `fix-${feature.key}-${fixAttempt}`;
       this.emit({ type: "feature-state", feature: feature.key, title: feature.title, state: "fixing" });
-      this.emit({ type: "agent", id: `fix-${feature.key}-${fixAttempt}`, role: "fix", target: feature.title, phase: "start" });
-      const fx = await runFixer(this.cfg, feature, verdict, fixAttempt + 1, this.cfg.maxFixAttempts);
-      this.emit({ type: "agent", id: `fix-${feature.key}-${fixAttempt}`, role: "fix", target: feature.title, phase: "end" });
+      this.emit({ type: "agent", id: fixId, role: "fix", target: feature.title, phase: "start" });
+      const fx = await this.withController(fixId, this.cfg.absoluteTimeoutMs, (signal) =>
+        runFixer(this.cfg, feature, verdict!, fixAttempt + 1, this.cfg.maxFixAttempts, { signal, onActivity: (l) => this.activity(fixId, l) }),
+      ).catch((e) => { if (isRateLimit(e)) throw e; this.log(`  ⚠️  Fixer ${this.stoppedIds.has(fixId) ? "stopped" : "errored"}: ${(e as Error)?.message ?? e}`); return { commits: 0, blocked: { reason: "fixer stopped/errored" }, worktreePath: undefined }; });
+      this.emit({ type: "agent", id: fixId, role: "fix", target: feature.title, phase: "end" });
       if (fx.blocked) { this.log(`  🛟 Fixer bailed: ${fx.blocked.reason ?? "blocked"}.`); break; }
       // loop re-verifies
     }

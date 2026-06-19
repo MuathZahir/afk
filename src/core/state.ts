@@ -25,7 +25,11 @@ export type EventBody =
 /** A persisted event: a body plus the timestamp the store stamps on. */
 export type Event = { ts: string } & EventBody;
 export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify";
-export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question";
+export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question" | "stopped";
+
+/** A live agent-stream line (assistant text or tool call). Transient — streamed to the dashboard but
+ *  NOT persisted to the durable event log (it would flood it); kept only in a bounded in-memory buffer. */
+export type ActivityFrame = { type: "activity"; id: string; line: string; ts: string };
 export type FeatureState = "building" | "verifying" | "fixing" | "verified" | "unverified" | "pr-open" | "merged" | "needs-human";
 
 // ── snapshot (what the dashboard renders) ───────────────────────────────────────
@@ -34,7 +38,7 @@ export type Snapshot = {
   lastPoll?: { ts: string; ready: number; picked: number };
   issues: Record<number, { number: number; title: string; feature: string | null; state: IssueState; note?: string; updated: string }>;
   features: Record<string, { key: string; title: string; state: FeatureState; pr?: { url: string; state: string }; verdict?: { ok: boolean; summary: string; passed: number; total: number }; note?: string; updated: string }>;
-  agents: Record<string, { id: string; role: AgentRole; target: string; active: boolean; lastText?: string; tokens: number; started: string; updated: string }>;
+  agents: Record<string, { id: string; role: AgentRole; target: string; active: boolean; lastText?: string; tokens: number; started: string; updated: string; log?: string[] }>;
   escalations: { issue: number; title: string; reason: string; branch?: string; ts: string }[];
   questions: Record<string, { id: string; issue: number; prompt: string; answer?: string; ts: string }>;
   totals: { merged: number; escalated: number; verified: number; tokens: number };
@@ -98,9 +102,12 @@ export function reduce(events: Event[]): Snapshot {
   return s;
 }
 
+const ACTIVITY_KEEP = 40; // lines retained per agent (in-memory, session-scoped)
+
 /** Live store backed by a JSONL file. Append-only; notifies subscribers (the SSE stream). */
 export class Store {
-  private subs = new Set<(e: Event) => void>();
+  private subs = new Set<(e: Event | ActivityFrame) => void>();
+  private activityBuf = new Map<string, string[]>();
   constructor(public readonly file: string) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
@@ -111,12 +118,26 @@ export class Store {
     for (const fn of this.subs) { try { fn(full); } catch { /* a slow subscriber must not break append */ } }
     return full;
   }
+  /** Record a live agent-stream line: kept in a bounded in-memory buffer + streamed to subscribers,
+   *  but never written to disk (transient by design — see ActivityFrame). */
+  activity(id: string, line: string): void {
+    const buf = this.activityBuf.get(id) ?? [];
+    buf.push(line);
+    while (buf.length > ACTIVITY_KEEP) buf.shift();
+    this.activityBuf.set(id, buf);
+    const frame: ActivityFrame = { type: "activity", id, line, ts: new Date().toISOString() };
+    for (const fn of this.subs) { try { fn(frame); } catch { /* ignore */ } }
+  }
   /** Replay the log from disk (restart recovery). */
   all(): Event[] {
     try {
       return fs.readFileSync(this.file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Event);
     } catch { return []; }
   }
-  snapshot(): Snapshot { return reduce(this.all()); }
-  subscribe(fn: (e: Event) => void): () => void { this.subs.add(fn); return () => this.subs.delete(fn); }
+  snapshot(): Snapshot {
+    const snap = reduce(this.all());
+    for (const [id, log] of this.activityBuf) if (snap.agents[id]) snap.agents[id].log = log;
+    return snap;
+  }
+  subscribe(fn: (e: Event | ActivityFrame) => void): () => void { this.subs.add(fn); return () => this.subs.delete(fn); }
 }

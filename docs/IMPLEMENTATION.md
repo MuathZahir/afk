@@ -93,10 +93,13 @@ Applies to the existing per-issue engine; no architecture change.
 - Serves a single-file SPA, a JSON snapshot (`/api/state`), a live **SSE** stream (`/api/stream`),
   and the action endpoints. The server's `reduce()` is the single source of truth — the client
   re-pulls the snapshot on each event instead of re-implementing the fold.
-- **Views:** daemon status + totals, epic→issue tree with per-node state, running agents (role,
-  target, tokens, live pulse), the needs-human queue, and clarifying questions.
-- **Actions:** one-click merge a ready PR, re-queue an escalation, answer a question, pause/resume.
-  Every action earns its place against "could you just do this in GitHub?"
+- **Views:** daemon status + totals, epic→issue tree with per-node state, running agents with a
+  **live transcript** (the agent's narration + every tool call, funneled from sandcastle's stream via
+  `logging.onAgentStreamEvent`), the needs-human queue, and clarifying questions. Transcript lines are
+  transient — streamed + buffered in memory, never written to the durable event log.
+- **Actions:** **stop a single worker** (aborts its run, preserves partial work), one-click merge a
+  ready PR, re-queue an escalation, answer a question, pause/resume. Every action earns its place
+  against "could you just do this in GitHub?"
 
 ## Shipped: clarifying-question protocol (the ask-don't-guess valve)
 

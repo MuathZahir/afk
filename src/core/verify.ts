@@ -14,7 +14,7 @@ import * as sandcastle from "@ai-hero/sandcastle";
 import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Resolved } from "./config.js";
 import { Verdict } from "./types.js";
-import { readJson, slug } from "./sh.js";
+import { readJson, slug, streamLogging } from "./sh.js";
 
 const WORKER_IMAGE = "afk-worker";
 const PROMPT = ".sandcastle/verify-prompt.md";
@@ -43,6 +43,7 @@ export async function verifyFeature(
   cfg: Resolved,
   feature: { branch: string; title: string },
   issuesJson: string,
+  opts: { signal?: AbortSignal; onActivity?: (line: string) => void } = {},
 ): Promise<VerifyResult> {
   const gate = canVerify(cfg);
   if (!gate.ok) return { kind: "unverified", reason: gate.reason };
@@ -72,16 +73,15 @@ export async function verifyFeature(
     });
 
     const afk = path.join(sandbox.worktreePath, ".afk");
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(new Error(`verify hit the ${cfg.verify.timeoutSec}s cap`)), (cfg.verify.timeoutSec ?? 1200) * 1000);
-    try {
+    {
       await sandbox.run({
         name: `verify-${feature.branch}`,
         agent: sandcastle.claudeCode(cfg.models.verify, { env: { CLAUDE_CODE_OAUTH_TOKEN: cfg.oauth } }),
         promptFile: PROMPT,
         completionSignal: "<promise>COMPLETE</promise>",
         idleTimeoutSeconds: cfg.idleTimeoutSec,
-        signal: ac.signal,
+        signal: opts.signal,
+        logging: streamLogging(path.join(".afk", "logs", `verify-${featureSlug}.log`), (line) => opts.onActivity?.(line)),
         promptArgs: {
           FEATURE_TITLE: feature.title,
           FEATURE_SLUG: featureSlug,
@@ -96,7 +96,7 @@ export async function verifyFeature(
           BACKEND_ONLY: String(cfg.verify.backendOnly),
         },
       });
-    } finally { clearTimeout(timer); }
+    }
 
     const verdict = readJson<Verdict>(path.join(afk, "verdict.json"));
     if (!verdict || typeof verdict.ok !== "boolean") {

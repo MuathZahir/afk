@@ -54,17 +54,22 @@ export const SPA = /* html */ `<!doctype html>
   .issue { display:flex; align-items:center; gap:9px; padding:7px 13px 7px 26px; border-top:1px solid var(--line); font-size:13px; }
   .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .s-merged{ background:var(--good); } .s-implementing{ background:var(--info); box-shadow:0 0 0 0 var(--info); animation:pulse 1.6s infinite; }
-  .s-escalated,.s-blocked,.s-conflict,.s-error,.s-timeout{ background:var(--bad); } .s-queued,.s-rescued{ background:var(--faint); }
+  .s-escalated,.s-blocked,.s-conflict,.s-error,.s-timeout{ background:var(--bad); } .s-queued,.s-rescued,.s-stopped{ background:var(--faint); }
   .s-question{ background:var(--warn); }
   @keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(74,168,255,.5);} 70%{ box-shadow:0 0 0 7px rgba(74,168,255,0);} 100%{ box-shadow:0 0 0 0 rgba(74,168,255,0);} }
-  .agent { display:flex; align-items:center; gap:11px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .agent { display:block; padding:10px 14px; border-bottom:1px solid var(--line); }
   .agent:last-child{ border-bottom:none; }
+  .agent .hdr { display:flex; align-items:center; gap:11px; }
   .role { font:600 10px/1 var(--mono); padding:4px 7px; border-radius:6px; text-transform:uppercase; border:1px solid var(--line); color:var(--dim); }
   .role.implement{ color:var(--accent); border-color:#2d356b; } .role.verify{ color:var(--info); border-color:#1f455e; }
   .role.fix,.role.resolve{ color:var(--warn); border-color:#5e4a1f; }
   .agent .what { flex:1; min-width:0; } .agent .what .t { font-weight:600; } .agent .what .x { color:var(--faint); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .agent .tok { font:600 11px var(--mono); color:var(--dim); }
-  .live-dot { width:7px; height:7px; border-radius:50%; background:var(--good); animation:pulse 1.6s infinite; }
+  .agent .log { margin-top:8px; max-height:168px; overflow-y:auto; background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; padding:7px 10px; font:11px/1.55 var(--mono); color:var(--dim); white-space:pre-wrap; word-break:break-word; }
+  .agent .log:empty { display:none; }
+  button.stop { background:#221016; border-color:#5e1f2c; color:var(--bad); font-size:11px; padding:4px 10px; } button.stop:hover { border-color:var(--bad); }
+  .live-dot { width:7px; height:7px; border-radius:50%; background:var(--good); animation:pulse 1.6s infinite; flex:none; }
   .esc { padding:11px 14px; border-bottom:1px solid var(--line); }
   .esc:last-child{ border-bottom:none; } .esc .r { color:var(--dim); font-size:13px; margin:3px 0 8px; }
   .row { display:flex; align-items:center; gap:8px; } .crit { font:11px var(--mono); color:var(--faint); padding:2px 13px; }
@@ -144,11 +149,17 @@ function render(){
     : '<div class="empty">None.</div>';
 
   const agents = Object.values(state.agents||{}).filter(a=>a.active).sort((a,b)=>a.started.localeCompare(b.started));
-  $("agents").innerHTML = agents.length ? agents.map(a=>\`<div class="agent">
-      <span class="live-dot"></span><span class="role \${esc(a.role)}">\${esc(a.role)}</span>
-      <div class="what"><div class="t">\${esc(a.target)}</div><div class="x">\${esc(a.lastText||"working…")}</div></div>
-      <span class="tok">\${a.tokens?a.tokens.toLocaleString()+" tok":""}</span></div>\`).join("")
-    : '<div class="empty">Idle — no agents running.</div>';
+  $("agents").innerHTML = agents.length ? agents.map(a=>{
+    const log = (a.log||[]).slice(-14).map(esc).join("\\n");
+    return \`<div class="agent">
+      <div class="hdr"><span class="live-dot"></span><span class="role \${esc(a.role)}">\${esc(a.role)}</span>
+        <div class="what"><div class="t">\${esc(a.target)}</div></div>
+        <span class="tok">\${a.tokens?a.tokens.toLocaleString()+" tok":""}</span>
+        <button class="stop" onclick="stop('\${esc(a.id)}')">Stop</button></div>
+      <div class="log" id="log-\${esc(a.id)}">\${log}</div></div>\`;
+  }).join("") : '<div class="empty">Idle — no agents running.</div>';
+  // keep each transcript pinned to the latest line
+  for(const a of agents){ const el=$("log-"+a.id); if(el) el.scrollTop=el.scrollHeight; }
 
   $("esc").innerHTML = (state.escalations||[]).length ? state.escalations.slice().reverse().map(e=>\`<div class="esc">
       <div class="row"><b>#\${e.issue}</b> <span>\${esc(e.title)}</span></div>
@@ -168,13 +179,22 @@ async function refresh(){ try{ state = await (await fetch("/api/state")).json();
 async function post(p,b){ await fetch(p,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(b||{})}); }
 function toggle(){ post(paused?"/api/resume":"/api/pause").then(refresh); }
 function retry(n){ post("/api/retry",{issue:n}).then(refresh); }
+function stop(id){ post("/api/stop",{id}); }
 function answer(id){ post("/api/answer",{id,text:$("q-"+id).value}).then(refresh); }
 async function merge(f){ const r=await (await fetch("/api/merge",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({feature:f})})).json(); if(!r.ok) alert("Merge failed: "+r.error); refresh(); }
 
 let pending=null;
 const ev = new EventSource("/api/stream");
 ev.addEventListener("snapshot", (m)=>{ state=JSON.parse(m.data); render(); });
-ev.addEventListener("event", ()=>{ clearTimeout(pending); pending=setTimeout(refresh,180); });
+ev.addEventListener("event", (m)=>{
+  let d; try{ d=JSON.parse(m.data); }catch{ return; }
+  if(d.type==="activity"){ // live transcript line — apply directly, no refetch
+    const a = state && state.agents && state.agents[d.id];
+    if(a){ a.log=a.log||[]; a.log.push(d.line); if(a.log.length>40) a.log.shift(); render(); }
+    return;
+  }
+  clearTimeout(pending); pending=setTimeout(refresh,180);
+});
 ev.onerror = ()=>{ $("status").textContent="reconnecting…"; $("status").className="pill"; };
 refresh();
 </script>

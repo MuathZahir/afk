@@ -40,6 +40,21 @@ test("Store: subscribers receive appended events live", () => {
   assert.deepEqual(seen, ["poll"]); // unsubscribed before the second
 });
 
+test("Store: activity is live + buffered into the snapshot but never persisted", () => {
+  const s = tmpStore();
+  s.append({ type: "agent", id: "impl-1", role: "implement", target: "#1", phase: "start" });
+  const frames: string[] = [];
+  const off = s.subscribe((e) => { if (e.type === "activity") frames.push(e.line); });
+  s.activity("impl-1", "🔧 Bash npm test");
+  s.activity("impl-1", "writing the failing test first");
+  off();
+  assert.deepEqual(frames, ["🔧 Bash npm test", "writing the failing test first"]);
+  // surfaced in the snapshot…
+  assert.deepEqual(s.snapshot().agents["impl-1"].log, ["🔧 Bash npm test", "writing the failing test first"]);
+  // …but a fresh Store over the same file has none (transient — not in the durable log)
+  assert.equal(new Store(s.file).snapshot().agents["impl-1"].log, undefined);
+});
+
 // minimal stand-in for the Daemon's surface the server touches
 function stubDaemon(store: Store) {
   const calls: string[] = [];
@@ -49,6 +64,7 @@ function stubDaemon(store: Store) {
     resume() { calls.push("resume"); },
     retry(n: number) { calls.push("retry:" + n); },
     answer(id: string, t: string) { calls.push("answer:" + id + ":" + t); },
+    stopAgent(id: string) { calls.push("stop:" + id); return true; },
     merge(f: string) { calls.push("merge:" + f); return { ok: true }; },
   };
   return { d: d as unknown as Daemon, calls };
@@ -80,8 +96,9 @@ test("server: action endpoints invoke the daemon", async () => {
   try {
     await fetch(base + "/api/pause", { method: "POST" });
     await fetch(base + "/api/retry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ issue: 7 }) });
+    await fetch(base + "/api/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "impl-7" }) });
     const merge = await (await fetch(base + "/api/merge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ feature: "epic-1" }) })).json();
-    assert.deepEqual(calls, ["pause", "retry:7", "merge:epic-1"]);
+    assert.deepEqual(calls, ["pause", "retry:7", "stop:impl-7", "merge:epic-1"]);
     assert.equal(merge.ok, true);
   } finally { server.close(); }
 });

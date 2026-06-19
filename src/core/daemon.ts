@@ -34,7 +34,11 @@ export class Daemon {
 
   constructor(private cfg: Resolved) {
     this.store = new Store(path.join(".afk", "state", "events.jsonl"));
-    this.engine = new Engine(cfg, { log: (m) => console.log(m), emit: (e) => this.store.append(e) });
+    this.engine = new Engine(cfg, {
+      log: (m) => console.log(m),
+      emit: (e) => this.store.append(e),
+      activity: (id, line) => this.store.activity(id, line),
+    });
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -145,6 +149,9 @@ export class Daemon {
   // ── control surface (dashboard actions) ───────────────────────────────────────
   pause(): void { this.paused = true; this.store.append({ type: "daemon", status: "paused" }); }
   resume(): void { this.paused = false; this.backoffUntil = 0; this.store.append({ type: "daemon", status: "resumed" }); this.store.append({ type: "daemon", status: "polling" }); }
+
+  /** Stop a single running agent (the dashboard's per-worker stop button). */
+  stopAgent(id: string): boolean { return this.engine.stopAgent(id); }
 
   /** Re-queue an escalated issue: swap the human label back to ready so the next poll re-picks it. */
   retry(issue: number): void {

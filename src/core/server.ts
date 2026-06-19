@@ -45,6 +45,7 @@ export function serveDashboard(daemon: Daemon, port: number): http.Server {
         case "/api/resume": daemon.resume(); return send(200, "{}");
         case "/api/retry": daemon.retry(Number(body.issue)); return send(200, "{}");
         case "/api/answer": daemon.answer(String(body.id), String(body.text ?? "")); return send(200, "{}");
+        case "/api/stop": return send(200, JSON.stringify({ ok: daemon.stopAgent(String(body.id)) }));
         case "/api/merge": return send(200, JSON.stringify(daemon.merge(String(body.feature))));
       }
     }
