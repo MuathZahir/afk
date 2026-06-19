@@ -24,6 +24,7 @@ export type Resolved = {
   verify: Required<Pick<VerifyConfig, "enabled" | "backendOnly">> & VerifyConfig;
   pollSeconds: number;
   dashboardPort: number;
+  cache: boolean;
   setup: string;
   nwo: string;
   oauth: string;
@@ -75,6 +76,7 @@ export function loadConfig(cwd = process.cwd()): Resolved {
     },
     pollSeconds: raw.pollSeconds ?? 60,
     dashboardPort: raw.dashboardPort ?? 7777,
+    cache: raw.cache ?? true,
     setup: raw.setup ?? "npm ci",
     nwo,
     oauth,

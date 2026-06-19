@@ -19,6 +19,7 @@ import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Resolved } from "./config.js";
 import { Feature, Picked, Result, Verdict } from "./types.js";
 import { gh, git, isRateLimit, readJson, readText, slug, streamLogging } from "./sh.js";
+import { cacheActive, cacheMounts } from "./cache.js";
 import { classifyError, classifyVerdict } from "./classify.js";
 import { verifyFeature, verdictMarkdown } from "./verify.js";
 import { runFixer, runResolver } from "./fix.js";
@@ -235,15 +236,12 @@ export class Engine {
     const done = (r: Result): Result => { this.emit({ type: "agent", id: agentId, role: "implement", target: `#${p.number}`, phase: "end" }); return r; };
     // The longest, quietest phase: bring up the container + run `setup` (npm install) BEFORE the
     // agent produces any stream output. Tell the dashboard so it isn't a silent "waiting for output".
-    this.activity(agentId, `🛠 starting sandbox + running setup (\`${this.cfg.setup}\`)${process.platform === "win32" ? " — note: dep caching is off on Windows, so first install is slow" : ""}…`);
+    this.activity(agentId, `🛠 starting sandbox + running setup (\`${this.cfg.setup}\`)${cacheActive(this.cfg) ? "" : " — dep cache off, so this install is slow"}…`);
     try {
       sandbox = await sandcastle.createSandbox({
         sandbox: dockerSandbox({
           imageName: WORKER_IMAGE,
-          mounts: process.platform === "win32" ? [] : [
-            { hostPath: this.cfg.npmCacheDir, sandboxPath: "~/.npm" },
-            { hostPath: this.cfg.nmCacheDir, sandboxPath: "node_modules" },
-          ],
+          mounts: cacheMounts(this.cfg),
         }),
         branch: p.branch,
         baseBranch: p.feature,

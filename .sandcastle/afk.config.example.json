@@ -8,6 +8,7 @@
   "model": "opus",
   "models": { "implement": "opus", "verify": "sonnet", "fix": "opus", "classify": "haiku" },
   "setup": "rm -f package-lock.json && npm install --no-audit --no-fund && git checkout -- package-lock.json 2>/dev/null; true",
+  "cache": true,
   "verify": {
     "enabled": true,
     "backendOnly": false,

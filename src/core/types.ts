@@ -41,6 +41,9 @@ export type Config = {
   model?: string;
   models?: { implement?: string; verify?: string; fix?: string; classify?: string };
   setup?: string;
+  /** Bind-mount the npm + node_modules caches into workers so installs are reused across runs.
+   *  Default true; set false to force a clean install every time. */
+  cache?: boolean;
   labels?: { ready?: string; human?: string };
   verify?: VerifyConfig;
   /** Daemon-only: seconds between queue polls (Phase 3). */

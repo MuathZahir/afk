@@ -177,6 +177,7 @@ its PR. `/triage` the `ready-for-human` pile. At release time, `afk changelog --
 | `model` | `opus` | default agent model (fallback for `models`) |
 | `models` | per-role | `{ implement: opus, verify: sonnet, fix: opus, classify: haiku }` — tuned for subscription rate-windows |
 | `setup` | auto-detected | install command run **inside** the Linux container |
+| `cache` | `true` | bind-mount the npm + `node_modules` caches into workers so installs are reused across runs (works on Windows + macOS + Linux; AFK probes once and falls back to no-cache if the host can't bind-mount). Set `false` to force a clean install each run. |
 | `verify` | auto-detected | `{ enabled, baseUrl, up, down, dbReset, appBoot, seed, secrets, backendOnly, timeoutSec }` — the verification env contract (see below) |
 | `pollSeconds` | `60` | `afk watch`: seconds between queue polls |
 | `dashboardPort` | `7777` | `afk watch`: localhost port for the dashboard |

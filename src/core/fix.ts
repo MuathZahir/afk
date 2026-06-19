@@ -13,6 +13,7 @@ import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Resolved } from "./config.js";
 import { Verdict } from "./types.js";
 import { readJson, streamLogging } from "./sh.js";
+import { cacheMounts } from "./cache.js";
 
 const WORKER_IMAGE = "afk-worker";
 
@@ -35,10 +36,7 @@ async function runOnFeature(
     sandbox = await sandcastle.createSandbox({
       sandbox: dockerSandbox({
         imageName: WORKER_IMAGE,
-        mounts: process.platform === "win32" ? [] : [
-          { hostPath: cfg.npmCacheDir, sandboxPath: "~/.npm" },
-          { hostPath: cfg.nmCacheDir, sandboxPath: "node_modules" },
-        ],
+        mounts: cacheMounts(cfg),
       }),
       branch: feature,
       baseBranch: feature, // already exists

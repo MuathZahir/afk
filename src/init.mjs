@@ -109,6 +109,8 @@ if (fs.existsSync(cfgPath)) {
     model: "opus",
     models: { implement: "opus", verify: "sonnet", fix: "opus", classify: "haiku" },
     setup,
+    // Reuse the npm + node_modules caches across runs (cross-platform; AFK probes + falls back).
+    cache: true,
     // Phase 1 — verification env contract. Auto-detected; every field is overridable. With no
     // compose stack the Verifier marks features "unverified" (never a false-green) instead of failing.
     verify: { enabled: hasCompose, backendOnly: false, timeoutSec: 1200, baseUrl: "", up: "", down: "", dbReset: "", appBoot: "", seed: "", secrets: "" },

@@ -15,6 +15,7 @@ import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Resolved } from "./config.js";
 import { Verdict } from "./types.js";
 import { readJson, slug, streamLogging } from "./sh.js";
+import { cacheMounts } from "./cache.js";
 
 const WORKER_IMAGE = "afk-worker";
 const PROMPT = ".sandcastle/verify-prompt.md";
@@ -62,10 +63,7 @@ export async function verifyFeature(
         // daemon (verify-in-place, not docker-in-docker). canVerify already excluded Windows.
         mounts: [
           { hostPath: DOCKER_SOCK, sandboxPath: DOCKER_SOCK },
-          ...(needsDeps ? [
-            { hostPath: cfg.npmCacheDir, sandboxPath: "~/.npm" },
-            { hostPath: cfg.nmCacheDir, sandboxPath: "node_modules" },
-          ] : []),
+          ...(needsDeps ? cacheMounts(cfg) : []),
         ],
       }),
       branch: feature.branch,
