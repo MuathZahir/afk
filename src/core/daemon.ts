@@ -60,6 +60,20 @@ export class Daemon {
 
   stop(): void { this.stopped = true; this.store.append({ type: "daemon", status: "stopped" }); }
 
+  /**
+   * Graceful shutdown: stop polling, abort in-flight agents, and wait (up to `timeoutMs`) for their
+   * sandboxes to tear down so we don't orphan Docker containers/worktrees. Stopped issues are left
+   * `ready-for-agent`, so the next `afk watch` resumes them. Returns when idle or the cap is hit.
+   */
+  async shutdown(timeoutMs = 30_000): Promise<void> {
+    this.stopped = true;
+    this.store.append({ type: "daemon", status: "stopped" });
+    this.engine.beginShutdown();
+    const deadline = Date.now() + timeoutMs;
+    while (this.engine.activeAgents > 0 && Date.now() < deadline) await sleep(500);
+    if (this.engine.activeAgents > 0) console.log(`  ${this.engine.activeAgents} agent(s) didn't wind down in ${timeoutMs / 1000}s — exiting anyway (their containers are reaped on next start).`);
+  }
+
   private onError(e: unknown): void {
     if (isRateLimit(e)) this.enterBackoff();
     else console.error("daemon tick error:", e);

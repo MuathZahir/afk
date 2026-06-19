@@ -43,6 +43,11 @@ export class Engine {
   /** Abort controller per running agent id, so the dashboard can stop a single worker. */
   private controllers = new Map<string, AbortController>();
   private stoppedIds = new Set<string>();
+  /** Set during daemon shutdown: in-flight agents are aborted but their issues are left re-queueable
+   *  (not escalated), so a stop-then-restart resumes them instead of dumping them on a human. */
+  private shuttingDown = false;
+  /** Number of agents currently registered (running) — lets the daemon wait for a clean drain. */
+  get activeAgents(): number { return this.controllers.size; }
 
   constructor(private cfg: Resolved, private hooks: EngineHooks = {}) {
     for (const d of [cfg.npmCacheDir, cfg.nmCacheDir]) fs.mkdirSync(d, { recursive: true });
@@ -69,6 +74,13 @@ export class Engine {
     ac.abort(new Error("Stopped by you from the dashboard."));
     this.log(`  ⏹  ${id}: stopped by user.`);
     return true;
+  }
+
+  /** Begin a graceful shutdown: abort every in-flight agent. Their issues are left re-queueable (the
+   *  catch checks `shuttingDown`), so the next `afk watch` re-picks them rather than escalating. */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+    for (const ac of this.controllers.values()) ac.abort(new Error("daemon shutting down"));
   }
 
   // ── serialized host-side git writes (parallel workers share ONE host repo) ──
@@ -261,6 +273,12 @@ export class Engine {
         }
       } catch (e) {
         if (isRateLimit(e)) throw e;
+        // Graceful daemon shutdown: don't rescue/escalate — just leave the issue ready so the next
+        // run re-picks it. (The label was never removed, so it's still in the queue.)
+        if (this.shuttingDown) {
+          this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "queued", note: "daemon stopped mid-run — will resume on next start" });
+          return done({ num: p.number, title: p.title, status: "stopped", feature: p.feature });
+        }
         if (sandbox && !this.branchAhead(p.branch, p.feature)) this.rescueUncommitted(sandbox.worktreePath, p);
         const userStopped = this.stoppedIds.has(agentId);
         const reason = userStopped
