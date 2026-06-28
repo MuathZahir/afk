@@ -23,7 +23,12 @@ export function cacheMounts(cfg: Resolved): MountConfig[] {
 
   const mounts: MountConfig[] = [
     { hostPath: cfg.npmCacheDir, sandboxPath: "~/.npm" },
-    { hostPath: cfg.nmCacheDir, sandboxPath: "node_modules" },
+    // Use the absolute container path, not the relative "node_modules". Sandcastle resolves a
+    // relative sandboxPath with Node's platform-aware path.resolve(), which on Windows turns the
+    // POSIX repo dir into a drive-prefixed Windows path (C:\home\agent\workspace\node_modules) and
+    // Docker rejects the resulting `-v` arg with "too many colons". An already-absolute POSIX path
+    // is left untouched (path.win32.isAbsolute("/…") === true), so it survives correctly.
+    { hostPath: cfg.nmCacheDir, sandboxPath: "/home/agent/workspace/node_modules" },
   ];
   // Probe: can a container actually start with this bind mount on this host? (Docker translates
   // forward-slashed Windows paths fine; `--entrypoint true` just exits 0 if the mount is valid.)
