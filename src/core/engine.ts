@@ -3,7 +3,8 @@
  * (daemon). It owns the proven safety nets (serialized git writes, uncommitted-work rescue, stale
  * worktree/container reaping) and the full per-issue → per-feature lifecycle:
  *
- *   implement (Opus, bounded self-correct) → land: a loose issue opens its own PR to the base
+ *   implement (Opus, bounded self-correct) → review (best-effort, same sandbox; severe finding ⇒
+ *     escalate) → land: a loose issue opens its own PR to the base
  *     branch; a grouped issue merges into its feature branch inside a THROWAWAY worktree
  *     (conflict → Resolver) → when the feature is complete: verify (Sonnet) → classify failure →
  *     Fixer loop / re-run → green ⇒ ready PR + evidence; otherwise escalate with evidence.
@@ -39,6 +40,22 @@ export const LIVE_VERIFY_LABEL = "verify:live-pending";
  *  issue merges into its feature branch. Pure — unit-tested against `deriveFeature`'s outputs. */
 export function looseIssue(p: { feature: string; featureKey: string | null }, baseBranch: string): boolean {
   return p.featureKey === null || p.feature === baseBranch;
+}
+
+/** Route the Reviewer's outcome. Pure — unit-tested. Review is best-effort: only a rate limit
+ *  (must bubble up so run/watch back off, like every other agent path) or an explicit severe
+ *  finding in `.afk/review.json` stops a good implement from landing. */
+export function routeReview(err: unknown, review: unknown):
+  | { action: "rethrow" }
+  | { action: "escalate"; reason: string }
+  | { action: "proceed"; warn?: string } {
+  if (err != null) {
+    if (isRateLimit(err)) return { action: "rethrow" };
+    return { action: "proceed", warn: String((err as Error)?.message ?? err).split("\n")[0] };
+  }
+  const severe = (review as { severe?: unknown } | null)?.severe;
+  if (typeof severe === "string" && severe.trim() !== "") return { action: "escalate", reason: severe };
+  return { action: "proceed" };
 }
 
 /**
@@ -410,6 +427,16 @@ export class Engine {
         return done({ num: p.number, title: p.title, status: "rescued", feature: p.feature });
       }
 
+      // ── review: best-effort second pair of eyes in the SAME warm sandbox, before any landing ──
+      // The Reviewer may commit small fixes on the issue branch (they land with the rest). Only an
+      // explicit severe finding blocks the landing; any other review failure just logs and proceeds.
+      const severe = await this.reviewIssue(sandbox, p, issueJson, forkRef);
+      if (severe) {
+        preserve = this.escalate(p.number, p.title, `The Reviewer flagged a severe problem it couldn't safely fix: ${severe}`, "", p.branch);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
+        return done({ num: p.number, title: p.title, status: "blocked", feature: p.feature });
+      }
+
       // ── land: loose issue → its own PR to the base branch (no local merge, ever) ──
       if (loose) {
         const url = this.openIssuePR(p, summary);
@@ -466,6 +493,47 @@ export class Engine {
         try { git(["branch", "-D", p.branch]); } catch { /* gone / checked out */ }
       });
     }
+  }
+
+  /** Post-implement review pass — best-effort, in the SAME warm sandbox the Implementer used, on
+   *  the committed issue branch, diffing against `diffBase` (the feature branch for grouped issues,
+   *  `origin/<base>` for loose ones). Returns the severe-finding reason (→ caller escalates instead
+   *  of landing) or null (→ proceed to landing). Rate-limit errors rethrow like every other agent
+   *  path; any other failure logs a warning and lands anyway. Skips with one log line when the repo
+   *  has no `.sandcastle/review-prompt.md` (scaffolded before this feature — re-run `afk init`). */
+  private async reviewIssue(sandbox: sandcastle.Sandbox, p: Picked, issueJson: string, diffBase: string): Promise<string | null> {
+    if (this.shuttingDown) return null;
+    if (!fs.existsSync(path.join(sandbox.worktreePath, ".sandcastle", "review-prompt.md"))) {
+      this.log(`  🔎 #${p.number}: no .sandcastle/review-prompt.md in this repo — skipping review (re-run \`afk init\` to scaffold it).`);
+      return null;
+    }
+    const reviewId = `review-${p.number}`;
+    const afk = path.join(sandbox.worktreePath, ".afk");
+    try { fs.rmSync(path.join(afk, "review.json"), { force: true }); } catch { /* none */ }
+    this.log(`  🔎 #${p.number}: reviewing the diff against \`${diffBase}\`…`);
+    this.emit({ type: "agent", id: reviewId, role: "review", target: `#${p.number}`, phase: "start" });
+    let err: unknown = null;
+    try {
+      await this.withController(reviewId, this.cfg.absoluteTimeoutMs, (signal) =>
+        sandbox.run({
+          name: `review-#${p.number}`,
+          agent: sandcastle.claudeCode(this.cfg.models.review, { env: { CLAUDE_CODE_OAUTH_TOKEN: this.cfg.oauth } }),
+          promptFile: ".sandcastle/review-prompt.md",
+          completionSignal: "<promise>COMPLETE</promise>",
+          maxIterations: 1,
+          promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, BRANCH: p.branch, ISSUE_JSON: issueJson, DIFF_BASE: diffBase },
+          idleTimeoutSeconds: this.cfg.idleTimeoutSec,
+          signal,
+          logging: streamLogging(path.join(".afk", "logs", `${reviewId}.log`), (line) => this.activity(reviewId, line)),
+        }),
+      );
+    } catch (e) { err = e; }
+    this.emit({ type: "agent", id: reviewId, role: "review", target: `#${p.number}`, phase: "end" });
+    const route = routeReview(err, readJson(path.join(afk, "review.json")));
+    if (route.action === "rethrow") throw err;
+    if (route.action === "escalate") return route.reason;
+    if (route.warn) this.log(`  ⚠️  #${p.number}: Reviewer failed (${route.warn}) — landing anyway (review is best-effort).`);
+    return null;
   }
 
   /** Push a loose issue's branch and open (or refresh) its own PR against the base branch. The PR

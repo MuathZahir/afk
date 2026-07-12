@@ -18,7 +18,7 @@ export type Resolved = {
   absoluteTimeoutMs: number;
   absoluteTimeoutMin: number;
   maxFixAttempts: number;
-  models: { implement: string; verify: string; fix: string; classify: string };
+  models: { implement: string; verify: string; fix: string; classify: string; review: string };
   labelReady: string;
   labelHuman: string;
   verify: Required<Pick<VerifyConfig, "enabled" | "backendOnly">> & VerifyConfig;
@@ -52,6 +52,7 @@ export function loadConfig(cwd = process.cwd()): Resolved {
     verify: raw.models?.verify ?? "sonnet",
     fix: raw.models?.fix ?? model,
     classify: raw.models?.classify ?? "haiku",
+    review: raw.models?.review ?? "claude-sonnet-4-6",
   };
   const absoluteTimeoutMs = (raw.absoluteTimeoutMin ?? raw.issueTimeoutMin ?? 90) * 60_000;
   const cacheRoot = path.join(os.homedir(), ".afk", "cache");

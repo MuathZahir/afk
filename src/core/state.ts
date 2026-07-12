@@ -24,7 +24,7 @@ export type EventBody =
   | { type: "verdict"; feature: string; ok: boolean; summary: string; passed: number; total: number };
 /** A persisted event: a body plus the timestamp the store stamps on. */
 export type Event = { ts: string } & EventBody;
-export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify";
+export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify" | "review";
 export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question" | "stopped";
 
 /** A live agent-stream line (assistant text or tool call). Transient — streamed to the dashboard but

@@ -82,7 +82,7 @@ if (!dockerUp) {
 step("Harness");
 const dstSc = path.join(TARGET, ".sandcastle");
 fs.mkdirSync(path.join(dstSc, "lib"), { recursive: true });
-const PROMPTS = ["implement-prompt.md", "verify-prompt.md", "fix-prompt.md", "resolve-prompt.md"];
+const PROMPTS = ["implement-prompt.md", "review-prompt.md", "verify-prompt.md", "fix-prompt.md", "resolve-prompt.md"];
 for (const p of PROMPTS) fs.copyFileSync(path.join(AFK, ".sandcastle", p), path.join(dstSc, p));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "Dockerfile"), path.join(dstSc, "Dockerfile"));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "lib", "make-gif.sh"), path.join(dstSc, "lib", "make-gif.sh"));
@@ -107,7 +107,7 @@ if (fs.existsSync(cfgPath)) {
     baseBranch: base, maxParallel: 2, maxIssuesPerRun: 5,
     idleTimeoutMin: 10, absoluteTimeoutMin: 90, maxFixAttempts: 1,
     model: "opus",
-    models: { implement: "opus", verify: "sonnet", fix: "opus", classify: "haiku" },
+    models: { implement: "opus", verify: "sonnet", fix: "opus", classify: "haiku", review: "claude-sonnet-4-6" },
     setup,
     // Reuse the npm + node_modules caches across runs (cross-platform; AFK probes + falls back).
     cache: true,

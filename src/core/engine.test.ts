@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { looseIssue, mergeInWorktree } from "./engine.js";
+import { looseIssue, mergeInWorktree, routeReview } from "./engine.js";
 import { deriveFeature } from "./planner.js";
 
 const G = (dir: string, args: string[]) =>
@@ -109,4 +109,29 @@ test("mergeInWorktree: target branch checked out in the host tree → 'failed', 
     assert.equal(G(dir, ["status", "--porcelain"]), "");
     assert.equal(mergeWorktrees(dir), 0);
   } finally { cleanup(dir); }
+});
+
+// ── routeReview: the post-implement review is best-effort ────────────────────
+// Planted regression: a review failure must NEVER block a good implement from landing (only a rate
+// limit rethrows, only an explicit severe finding escalates) — otherwise adding review would turn
+// every reviewer hiccup into a lost landing.
+test("routeReview: severe finding in review.json → escalate with the reason", () => {
+  assert.deepEqual(routeReview(null, { severe: "missing organizationId filter on the new query" }),
+    { action: "escalate", reason: "missing organizationId filter on the new query" });
+});
+test("routeReview: rate-limit error → rethrow (even if review.json also has a severe finding)", () => {
+  assert.deepEqual(routeReview(new Error("Claude usage limit reached"), null), { action: "rethrow" });
+  assert.deepEqual(routeReview(new Error("HTTP 429 too many requests"), { severe: "x" }), { action: "rethrow" });
+  assert.deepEqual(routeReview(new Error("model overloaded"), null), { action: "rethrow" });
+});
+test("routeReview: any other reviewer error → proceed to landing, first error line as the warning", () => {
+  const r = routeReview(new Error("worker stalled (idle > 10m)\nstack trace..."), null);
+  assert.deepEqual(r, { action: "proceed", warn: "worker stalled (idle > 10m)" });
+});
+test("routeReview: clean run — no review.json, or one without a real severe reason → proceed", () => {
+  assert.deepEqual(routeReview(null, null), { action: "proceed" });
+  assert.deepEqual(routeReview(null, {}), { action: "proceed" });
+  assert.deepEqual(routeReview(null, { severe: "" }), { action: "proceed" });
+  assert.deepEqual(routeReview(null, { severe: "   " }), { action: "proceed" });
+  assert.deepEqual(routeReview(null, { severe: 42 }), { action: "proceed" });
 });

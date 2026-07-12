@@ -39,7 +39,7 @@ export type Config = {
   issueTimeoutMin?: number; // legacy → absolute cap
   maxFixAttempts?: number;
   model?: string;
-  models?: { implement?: string; verify?: string; fix?: string; classify?: string };
+  models?: { implement?: string; verify?: string; fix?: string; classify?: string; review?: string };
   setup?: string;
   /** Bind-mount the npm + node_modules caches into workers so installs are reused across runs.
    *  Default true; set false to force a clean install every time. */
