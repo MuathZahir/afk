@@ -116,6 +116,16 @@ export function mergeInWorktree(
   }
 }
 
+/** Cross-base landing guard. Pure — unit-tested. Milestone-grouped siblings (and, belt-and-
+ *  suspenders, epic children) can declare divergent `Base:` lines; the feature's base is
+ *  first-writer-wins, so a second sibling on a different base would silently merge cross-base
+ *  work. Returns the escalation reason naming both bases, or null when landing is safe (no
+ *  tracked feature yet, or the bases agree). */
+export function baseMismatch(feature: { base: string } | undefined, p: { feature: string; base: string }): string | null {
+  if (!feature || feature.base === p.base) return null;
+  return `Base mismatch: this issue resolved base \`${p.base}\`, but its feature \`${p.feature}\` is already tracking base \`${feature.base}\` — refusing to merge cross-base work.`;
+}
+
 /** Union two child-issue lists, deduped by issue number (first list wins on overlap). Pure —
  *  unit-tested. `featureChildren` uses it to merge body-text `## Parent` matches with the epic's
  *  NATIVE sub-issues, which the planner now groups by (body text alone misses them). */
@@ -510,6 +520,14 @@ export class Engine {
       }
 
       // ── grouped: merge issue branch → feature branch in a throwaway worktree; conflict → Resolver ──
+      // Cross-base guard: never merge into a feature that's tracking a DIFFERENT base.
+      const mismatch = baseMismatch(this.features.get(p.feature), p);
+      if (mismatch) {
+        preserve = this.escalate(p.number, p.title, mismatch,
+          "\nAlign the `Base:` lines (grouped siblings must agree on one base), then re-queue the issue.", workBranch);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
+        return done({ num: p.number, title: p.title, status: "error", feature: p.feature, base: p.base });
+      }
       const merge = await this.tryMerge(p);
       let failReason: string | null = null;
       if (merge === "conflict") {
@@ -644,13 +662,13 @@ export class Engine {
         return done(result("blocked"));
       }
 
+      // Durability ordering: findings → pointer → close. Closing LAST means a crash mid-sequence
+      // leaves the issue open and re-picked (a duplicate comment, acceptable) — closing before the
+      // pointer would lose the pointer forever, since closed issues are never re-picked.
       // (a) the findings ARE the resolution comment — clearly AFK-authored and unreviewed.
       gh(["issue", "comment", String(p.number), "--body",
         `> *Posted by AFK.*\n\n## 🔍 Research findings — AFK-authored, unreviewed\n\n${route.findings}`]);
-      // (b) auto-close is the chosen policy: drop the ready label and close the ticket.
-      try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
-      gh(["issue", "close", String(p.number)]);
-      // (c) one-line pointer COMMENT on the parent (the map) — NEVER an edit to its body; the next
+      // (b) one-line pointer COMMENT on the parent (the map) — NEVER an edit to its body; the next
       // /wayfinder session folds pointers into `## Decisions so far`.
       if (p.featureKey?.startsWith("epic-")) {
         const parent = p.featureKey.replace("epic-", "");
@@ -659,6 +677,9 @@ export class Engine {
             `> *Posted by AFK.*\n\n🔍 Research resolved: **${p.title}** — see #${p.number}. Fold into Decisions-so-far next session.`]);
         } catch (e) { this.log(`  ⚠️  #${p.number}: couldn't post the pointer comment on parent #${parent}: ${String((e as Error)?.message ?? e).split("\n")[0]}`); }
       }
+      // (c) auto-close is the chosen policy: drop the ready label and close the ticket.
+      try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
+      gh(["issue", "close", String(p.number)]);
       this.log(`  🔍 #${p.number}: research findings posted — issue closed.`);
       this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "researched" });
       return done(result("researched"));
@@ -831,11 +852,17 @@ export class Engine {
     return openReady.length === 0 && (feature.merged.length > 0 || landed.length > 0);
   }
 
-  /** Build the JSON of the feature's landed issues — their bodies carry the acceptance criteria. */
+  /** Build the JSON of the feature's landed issues — their bodies carry the acceptance criteria.
+   *  `wayfinder:research` children are excluded: their Questions aren't acceptance criteria and
+   *  would produce spurious Verifier failures. (They stay in `landedChildren`/`Closes` — harmless,
+   *  already closed.) */
   private featureIssuesJson(feature: Feature): string {
-    const issues = this.landedChildren(feature).map((n) => {
-      try { return JSON.parse(gh(["issue", "view", String(n), "--json", "number,title,body"])); } catch { return { number: n }; }
-    });
+    const issues = this.landedChildren(feature)
+      .map((n) => {
+        try { return JSON.parse(gh(["issue", "view", String(n), "--json", "number,title,body,labels"])); } catch { return { number: n }; }
+      })
+      .filter((i) => !((i.labels ?? []) as { name: string }[]).some((l) => l.name === "wayfinder:research"))
+      .map((i) => ({ number: i.number, title: i.title, body: i.body }));
     return JSON.stringify(issues, null, 2);
   }
 

@@ -109,8 +109,11 @@ export class Daemon {
 
   private launchIssue(p: Picked): void {
     this.active++; this.inFlight.add(p.number);
+    // `researched` also triggers the completion check: a research ticket that is the LAST open
+    // child of an epic closes without merging, and would otherwise leave the feature PR a draft
+    // until restart. Only for grouped issues — a loose research ticket has no feature to finalize.
     this.engine.processIssue(p)
-      .then((r) => { if (r.status === "merged") this.maybeFinalize(p); })
+      .then((r) => { if (r.status === "merged" || (r.status === "researched" && p.featureKey !== null)) this.maybeFinalize(p); })
       .catch((e) => this.onError(e))
       .finally(() => { this.active--; this.inFlight.delete(p.number); });
   }
@@ -118,7 +121,13 @@ export class Daemon {
   /** After an issue lands, finalize its feature iff every child has now landed. Guarded once. */
   private maybeFinalize(p: Picked): void {
     const feature = this.engine.features.get(p.feature);
-    if (!feature || this.finalizing.has(feature.branch)) return;
+    if (!feature) {
+      // A researched child's feature may not be in memory (its implement children all landed in a
+      // prior run) — nothing to finalize here; reconcile() covers it on the next start.
+      if (p.featureKey !== null) console.log(`  #${p.number}: feature ${p.feature} isn't tracked in this run — skipping finalize (reconcile covers it on restart).`);
+      return;
+    }
+    if (this.finalizing.has(feature.branch)) return;
     if (!this.engine.isFeatureComplete(feature)) return;
     this.launchFinalize(feature);
   }

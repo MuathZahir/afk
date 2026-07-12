@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { looseIssue, mergeInWorktree, routeResearch, routeReview, unionChildren } from "./engine.js";
+import { baseMismatch, looseIssue, mergeInWorktree, routeResearch, routeReview, unionChildren } from "./engine.js";
 import { deriveFeature } from "./planner.js";
 
 const G = (dir: string, args: string[]) =>
@@ -166,6 +166,24 @@ test("routeResearch: a clarifying question takes priority over everything else",
     { action: "question", q: { question: "which epoch?" } });
   // an empty question object doesn't count as a question
   assert.equal(routeResearch({}, null, "findings").action, "publish");
+});
+
+// ── baseMismatch: the cross-base landing guard ───────────────────────────────
+// Planted regression: milestone-grouped siblings can declare divergent `Base:` lines and the
+// feature's base is first-writer-wins — without the guard the second sibling silently merges
+// cross-base work into the feature branch. Divergence must block, agreement must not.
+test("baseMismatch: feature tracking a DIFFERENT base → escalation reason naming BOTH bases", () => {
+  const r = baseMismatch({ base: "helix.v2" }, { feature: "feat/billing", base: "helix.v2-act2" });
+  assert.ok(r !== null);
+  assert.match(r, /`helix\.v2-act2`/);
+  assert.match(r, /`helix\.v2`/);
+  assert.match(r, /feat\/billing/);
+});
+test("baseMismatch: bases agree → landing proceeds (null)", () => {
+  assert.equal(baseMismatch({ base: "main" }, { feature: "feat/7-x", base: "main" }), null);
+});
+test("baseMismatch: no tracked feature yet (first sibling) → landing proceeds (null)", () => {
+  assert.equal(baseMismatch(undefined, { feature: "feat/7-x", base: "main" }), null);
 });
 
 // ── unionChildren: featureChildren must see NATIVE sub-issue children too ────

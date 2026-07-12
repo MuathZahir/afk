@@ -260,23 +260,40 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
   const meta = fetchNativeMeta(deps.nwo, ready.map((i) => i.number), log);
   const byNumber = new Map(ready.map((i) => [i.number, i]));
 
+  // A `Base:`-looking line that doesn't parse (e.g. `Base: helix v2`) silently falls back — warn
+  // so the typo is visible. Parse semantics unchanged.
+  const warnUnparsedBase = (body: string, parsed: string | null, who: string): void => {
+    if (parsed !== null) return;
+    const line = body.match(/^base:.*$/im)?.[0];
+    if (line) log(`⚠️ ${who} has a \`Base:\` line that didn't parse — ignoring it: \`${line.trim()}\``);
+  };
+
   // Memoized per-candidate parent + base resolution — the cross-base blocker warning needs a
   // BLOCKER candidate's base too, and epic bodies are fetched once per epic (`parentInfo` cache).
+  // `null` = the issue HAS a parent but its body was unreadable (deleted epic OR transient `gh`
+  // failure) — the declared base is unknowable, so the caller skips the issue rather than guessing.
   type ResolvedIssue = {
     epicNum: number | null; epicTitle: string | null;
     base: string; baseSource: string; ignoredOwnBase: string | null;
   };
-  const resolvedCache = new Map<number, ResolvedIssue>();
-  const resolveFor = (i: Issue): ResolvedIssue => {
+  const resolvedCache = new Map<number, ResolvedIssue | null>();
+  const resolveFor = (i: Issue): ResolvedIssue | null => {
     const hit = resolvedCache.get(i.number);
-    if (hit) return hit;
+    if (hit !== undefined) return hit;
     const body = i.body ?? "";
     const parent = resolveParentIssue(meta.get(i.number)?.parent ?? null, body);
     const info = parent ? parentInfo(parent.num) : null;
-    if (parent && !info) log(`⚠️ #${i.number}: couldn't fetch epic #${parent.num}'s body — its \`Base:\` line (if any) is invisible, falling back.`);
+    if (parent && !info) {
+      // The cache is per-`pick()` call, so a transient `gh` failure self-heals next round.
+      log(`⚠️ couldn't read epic #${parent.num}'s body — skipping #${i.number} this round rather than guessing its base.`);
+      resolvedCache.set(i.number, null);
+      return null;
+    }
     const epicTitle = parent ? parent.title ?? info?.title ?? null : null;
     const ownBase = parseBaseLine(body);
+    warnUnparsedBase(body, ownBase, `issue #${i.number}`);
     const epicBase = info ? parseBaseLine(info.body) : null;
+    if (parent && info) warnUnparsedBase(info.body, epicBase, `epic #${parent.num}`);
     const { base, ignoredOwnBase } = resolveBase({ ownBase, hasEpic: parent !== null, epicBase, configBase: deps.baseBranch });
     const baseSource =
       parent !== null && epicBase !== null ? `the \`Base:\` line in epic #${parent.num}`
@@ -299,6 +316,7 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
     if (demote) { deps.onDemote(i.number, demote); continue; }
 
     const r = resolveFor(i);
+    if (r === null) continue; // epic body unreadable — skipped this round (logged in resolveFor)
 
     // Blocking: native dependencies are authoritative; body text is the deprecated fallback.
     const blockers = resolveBlockers(m?.blockedBy ?? null, body);
@@ -309,9 +327,9 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
       const cross = (m?.blockedBy ?? [])
         .map((b) => byNumber.get(b.number))
         .filter((c): c is Issue => c !== undefined)
-        .filter((c) => resolveFor(c).base !== r.base);
+        .filter((c) => { const rc = resolveFor(c); return rc !== null && rc.base !== r.base; });
       if (cross.length > 0)
-        log(`⚠️ #${i.number} (base \`${r.base}\`) is blocked by ${cross.map((c) => `#${c.number} (base \`${resolveFor(c).base}\`)`).join(", ")} on a DIFFERENT base — the dependency gates on issue-closed, not code-merged.`);
+        log(`⚠️ #${i.number} (base \`${r.base}\`) is blocked by ${cross.map((c) => `#${c.number} (base \`${resolveFor(c)!.base}\`)`).join(", ")} on a DIFFERENT base — the dependency gates on issue-closed, not code-merged.`);
       if (blockers.blocked) continue; // still blocked — try a later round
     } else {
       if (blockers.freeText) { deps.onAmbiguous(i.number, "Ambiguous `Blocked by` (no `#N` reference). Needs a human to clarify the dependency."); continue; }
@@ -326,11 +344,14 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
       { epicNum: r.epicNum, epicTitle: r.epicTitle, milestoneTitle: i.milestone?.title ?? null },
       r.base,
     );
+    const mode = issueMode(labels);
+    if (mode === "research" && labels.includes("wayfinder:prototype"))
+      log(`#${i.number}: labeled both \`wayfinder:research\` and \`wayfinder:prototype\` — research wins, the prototype build is skipped.`);
     out.push({
       number: i.number, title: i.title, branch: `afk/issue-${i.number}`,
       feature: branch, featureKey, featureTitle, base: r.base, baseSource: r.baseSource,
       liveVerify: requiresLiveVerify(body, labels),
-      mode: issueMode(labels),
+      mode,
     });
     if (out.length >= remaining) break;
   }

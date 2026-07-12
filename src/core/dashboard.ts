@@ -155,6 +155,7 @@ export const SPA = /* html */ `<!doctype html>
   .s-escalated,.s-blocked,.s-conflict,.s-error,.s-timeout{ background:var(--bad); box-shadow:0 0 8px rgba(255,93,118,.5); }
   .s-queued,.s-rescued,.s-stopped{ background:var(--faint); }
   .s-question{ background:var(--warn); box-shadow:0 0 8px rgba(245,177,63,.5); }
+  .s-researched{ background:#3fd8e7; box-shadow:0 0 8px rgba(63,216,231,.5); }
   @keyframes ring { 0%{ box-shadow:0 0 0 0 rgba(91,182,255,.55);} 70%{ box-shadow:0 0 0 7px rgba(91,182,255,0);} 100%{ box-shadow:0 0 0 0 rgba(91,182,255,0);} }
 
   /* ── agent cards ─────────────────────────────────────────────── */
@@ -167,6 +168,7 @@ export const SPA = /* html */ `<!doctype html>
   .role.implement{ color:var(--accent2); border-color:rgba(139,155,255,.4); background:rgba(139,155,255,.08); }
   .role.verify{ color:var(--info); border-color:rgba(91,182,255,.34); background:rgba(91,182,255,.08); }
   .role.fix,.role.resolve{ color:var(--warn); border-color:rgba(245,177,63,.34); background:rgba(245,177,63,.08); }
+  .role.research{ color:#3fd8e7; border-color:rgba(63,216,231,.34); background:rgba(63,216,231,.08); }
   .agent .what { flex:1; min-width:0; }
   .agent .what .t { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .agent .meta { display:flex; align-items:center; gap:8px; font:600 11px var(--mono); color:var(--faint); flex:none; }
