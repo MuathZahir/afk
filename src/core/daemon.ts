@@ -12,7 +12,7 @@
  */
 import * as path from "node:path";
 import { Resolved } from "./config.js";
-import { Engine } from "./engine.js";
+import { Engine, LIVE_VERIFY_LABEL } from "./engine.js";
 import { pick } from "./planner.js";
 import { gh, isRateLimit, slug } from "./sh.js";
 import { Feature, Picked } from "./types.js";
@@ -95,7 +95,9 @@ export class Daemon {
       picked = pick(free, {
         labelReady: this.cfg.labelReady,
         baseBranch: this.cfg.baseBranch,
+        nwo: this.cfg.nwo,
         onAmbiguous: (n, reason) => this.engine.escalate(n, `#${n}`, reason),
+        onDemote: (n, reason) => this.engine.demote(n, `#${n}`, reason),
       }).filter((p) => !this.inFlight.has(p.number));
     }
     try { ready = JSON.parse(gh(["issue", "list", "--label", this.cfg.labelReady, "--state", "open", "--json", "number"])).length; } catch { /* ignore */ }
@@ -134,8 +136,8 @@ export class Daemon {
    * verify interrupted by a crash gets re-run, and so the daemon won't reopen already-landed work.
    */
   private async reconcile(): Promise<void> {
-    let prs: { number: number; headRefName: string; body: string; isDraft: boolean }[] = [];
-    try { prs = JSON.parse(gh(["pr", "list", "--state", "open", "--json", "number,headRefName,body,isDraft", "--limit", "100"])); } catch { return; }
+    let prs: { number: number; headRefName: string; body: string; isDraft: boolean; labels?: { name: string }[] }[] = [];
+    try { prs = JSON.parse(gh(["pr", "list", "--state", "open", "--json", "number,headRefName,body,isDraft,labels", "--limit", "100"])); } catch { return; }
     let recovered = 0;
     for (const pr of prs) {
       const branch = pr.headRefName;
@@ -145,7 +147,10 @@ export class Daemon {
       const m = branch.match(/^feat\/(\d+)-/);
       const key = m ? `epic-${m[1]}` : `ms-${slug(branch.replace(/^feat\//, ""))}`;
       const title = this.deriveTitle(key, branch);
-      const feature: Feature = { key, title, branch, merged };
+      // A `verify:live-pending` label on the PR survives restarts — recover the draft-holding flag
+      // from it (we can't tell WHICH child asked, so attribute it to all recovered children).
+      const livePending = (pr.labels ?? []).some((l) => l.name === LIVE_VERIFY_LABEL);
+      const feature: Feature = { key, title, branch, merged, liveVerify: livePending ? [...merged] : [] };
       this.engine.features.set(branch, feature);
       recovered++;
       // A draft PR whose children have all closed = a verify we never finished. Re-finalize it.

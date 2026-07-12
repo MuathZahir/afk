@@ -54,7 +54,7 @@ export type Config = {
 
 // ── planning ─────────────────────────────────────────────────────────────────
 export type Milestone = { title: string } | null;
-export type Issue = { number: number; title: string; body: string; milestone: Milestone };
+export type Issue = { number: number; title: string; body: string; milestone: Milestone; labels?: { name: string }[] };
 
 /** A picked issue routed to its feature. `feature` is the branch; `featureKey` groups for verify. */
 export type Picked = {
@@ -64,9 +64,12 @@ export type Picked = {
   feature: string;      // feat/<...> or the base branch (legacy)
   featureKey: string | null; // stable id of the owning feature (epic#/slug or milestone), null = base
   featureTitle: string | null;
+  /** Issue body asked for a live verification pass (`Verify (live)…`) → its PR opens as a draft. */
+  liveVerify: boolean;
 };
 
-export type Feature = { key: string; title: string; branch: string; merged: number[] };
+/** `liveVerify` = landed children that requested a live pass → the feature PR stays draft. */
+export type Feature = { key: string; title: string; branch: string; merged: number[]; liveVerify: number[] };
 
 // ── per-issue/feature outcomes ────────────────────────────────────────────────
 export type IssueStatus =

@@ -32,6 +32,8 @@ import type { EventBody } from "./state.js";
 
 const WORKER_IMAGE = "afk-worker";
 const RELEASE_TAG = "afk-artifacts";
+/** PR label marking "green, but a human live-verification pass is still owed" (see `liveVerify`). */
+export const LIVE_VERIFY_LABEL = "verify:live-pending";
 
 /** A loose issue (no epic/milestone → routed at the base branch) lands via its OWN PR; a grouped
  *  issue merges into its feature branch. Pure — unit-tested against `deriveFeature`'s outputs. */
@@ -226,6 +228,15 @@ export class Engine {
     return !!branch;
   }
 
+  /** Demote an ineligible `ready-for-agent` issue (parent/epic or HITL — see planner
+   *  `ineligibleReason`) to the human queue: one comment naming the failed criterion + label swap.
+   *  Lives here with `escalate` because it's a GitHub mutation — the planner only decides. */
+  demote(num: number, title: string, reason: string): void {
+    gh(["issue", "comment", String(num), "--body", `> *Posted by AFK.*\n\n${reason}`]);
+    try { gh(["issue", "edit", String(num), "--remove-label", this.cfg.labelReady, "--add-label", this.cfg.labelHuman]); } catch { /* labels may not exist */ }
+    this.emit({ type: "escalation", issue: num, title, reason });
+  }
+
   /** Surface an agent's clarifying question as an issue comment + dashboard card; pause the issue. */
   private ask(p: Picked, q: { question?: string; detail?: string }, branch?: string): boolean {
     let branchNote = "";
@@ -409,7 +420,8 @@ export class Engine {
         }
         landed = true;
         // The PR body's `Closes #N` closes the issue when it merges — don't close it here.
-        gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — PR opened: ${url}**\n\n${summary}`]);
+        const liveNote = p.liveVerify ? `\n\n🔬 The PR is a **draft** pending a live verification pass (\`Verify (live)\` requested in the issue).` : "";
+        gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — PR opened: ${url}**${liveNote}\n\n${summary}`]);
         try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
         return done({ num: p.number, title: p.title, status: "merged", feature: p.feature });
@@ -435,10 +447,13 @@ export class Engine {
 
       // track for the feature PR + verify trigger; comment + close the issue
       if (p.featureKey) {
-        const f = this.features.get(p.feature) ?? { key: p.featureKey, title: p.featureTitle ?? p.featureKey, branch: p.feature, merged: [] };
-        f.merged.push(p.number); this.features.set(p.feature, f);
+        const f = this.features.get(p.feature) ?? { key: p.featureKey, title: p.featureTitle ?? p.featureKey, branch: p.feature, merged: [], liveVerify: [] };
+        f.merged.push(p.number);
+        if (p.liveVerify) f.liveVerify.push(p.number);
+        this.features.set(p.feature, f);
       }
-      gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — landed on \`${p.feature}\` (feature branch).**\n\n${summary}`]);
+      const groupedLiveNote = p.liveVerify ? `\n\n🔬 The feature PR will stay a **draft** pending a live verification pass (\`Verify (live)\` requested in this issue).` : "";
+      gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — landed on \`${p.feature}\` (feature branch).**${groupedLiveNote}\n\n${summary}`]);
       try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
       gh(["issue", "close", String(p.number)]);
       this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
@@ -454,21 +469,34 @@ export class Engine {
   }
 
   /** Push a loose issue's branch and open (or refresh) its own PR against the base branch. The PR
-   *  body carries `Closes #N`, so the issue closes when the PR merges. Returns the PR url or null. */
+   *  body carries `Closes #N`, so the issue closes when the PR merges. A `liveVerify` issue's PR
+   *  opens as a DRAFT + `verify:live-pending` label — a human owes it a live pass before merge.
+   *  Returns the PR url or null. */
   private openIssuePR(p: Picked, summary: string): string | null {
     try { git(["push", "-u", "origin", p.branch]); }
     catch (e) {
       this.log(`  ⚠️  #${p.number}: couldn't push ${p.branch}: ${String((e as Error)?.message ?? e).split("\n")[0]}`);
       return null;
     }
-    const body = `> *Opened by AFK.*\n\nCloses #${p.number}\n\n${summary}`;
+    const liveNote = p.liveVerify ? `\n\n🔬 **Draft pending a live verification pass** — requested via \`Verify (live)\` in #${p.number}.` : "";
+    const body = `> *Opened by AFK.*\n\nCloses #${p.number}${liveNote}\n\n${summary}`;
+    let url: string | null;
     try {
-      return gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", p.branch, "--title", `feat: ${p.title} (#${p.number})`, "--body", body]).trim();
+      url = gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", p.branch, "--title", `feat: ${p.title} (#${p.number})`, "--body", body, ...(p.liveVerify ? ["--draft"] : [])]).trim();
     } catch {
       // A PR for this branch may already exist (re-run) — refresh its body and return its url.
       try { gh(["pr", "edit", p.branch, "--body", body]); } catch { /* ignore */ }
-      try { return gh(["pr", "view", p.branch, "--json", "url", "-q", ".url"]).trim(); } catch { return null; }
+      try { url = gh(["pr", "view", p.branch, "--json", "url", "-q", ".url"]).trim(); } catch { url = null; }
     }
+    if (url && p.liveVerify) this.addLiveVerifyLabel(p.branch, `#${p.number}`);
+    return url;
+  }
+
+  /** Best-effort `verify:live-pending` label — the label may not exist in the repo, so a failure is
+   *  only a logged warning, never a failed landing. */
+  private addLiveVerifyLabel(branch: string, target: string): void {
+    try { gh(["pr", "edit", branch, "--add-label", LIVE_VERIFY_LABEL]); }
+    catch (e) { this.log(`  ⚠️  ${target}: couldn't add the ${LIVE_VERIFY_LABEL} label: ${String((e as Error)?.message ?? e).split("\n")[0]}`); }
   }
 
   /** Merge the issue branch into its feature branch inside a throwaway worktree (the host tree is
@@ -609,9 +637,16 @@ export class Engine {
     else if (v.verdict?.ok) { status = `${verdictMarkdown(v.verdict)}${v.evidenceMd}`; state = "ready"; }
     else if (v.verdict && !v.verdict.ok) { status = `${verdictMarkdown(v.verdict)}${v.evidenceMd}\n\n🛑 Verification failed and the Fixer couldn't make it green — needs a human.`; state = "draft"; }
     else { status = `⚠️ **Unverified** — ${v.unverifiedReason}. Tests pass per the implementers, but AFK couldn't run an end-to-end check on this host. Please test manually before merging.`; state = "ready"; }
+    // A live-verification request on ANY landed child keeps the PR a draft until a human passes it.
+    const livePending = feature.liveVerify.length > 0;
+    if (livePending) {
+      status += `\n\n🔬 **Draft pending a live verification pass** — requested via \`Verify (live)\` in ${feature.liveVerify.map((n) => `#${n}`).join(", ")}.`;
+      state = "draft";
+    }
 
     const body = `> *Opened by AFK.*\n\nImplements **${feature.title}**.\n\n${closes}\n\n${status}`;
     const url = this.createOrUpdatePR(feature.branch, feature.title, body, state === "draft");
+    if (url && livePending) this.addLiveVerifyLabel(feature.branch, feature.title);
     if (url) this.emit({ type: "pr", feature: feature.key, url, state });
     // One feature-state: building (incomplete) · verified (green) · needs-human (verify failed) · unverified.
     const fState = incomplete ? "building" : v.verdict?.ok ? "verified" : v.verdict ? "needs-human" : "unverified";

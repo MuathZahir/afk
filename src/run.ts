@@ -36,7 +36,9 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
     const batch = pick(cfg.maxIssues - processed, {
       labelReady: cfg.labelReady,
       baseBranch: cfg.baseBranch,
+      nwo: cfg.nwo,
       onAmbiguous: (n, reason) => engine.escalate(n, `#${n}`, reason),
+      onDemote: (n, reason) => engine.demote(n, `#${n}`, reason),
     });
     if (batch.length === 0) break;
     console.log(`Round: ${batch.map((b) => `#${b.number}→${b.feature}`).join(", ")}`);

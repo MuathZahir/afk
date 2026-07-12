@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { slug } from "./sh.js";
-import { blockersOf, parentIssueNumber, deriveFeature } from "./planner.js";
+import { blockersOf, parentIssueNumber, deriveFeature, ineligibleReason, liveVerifyRequested, resolveBlockers, resolveParentIssue } from "./planner.js";
 import { classifyVerdict, classifyError } from "./classify.js";
 import { reduce, type Event } from "./state.js";
 import type { Verdict } from "./types.js";
@@ -59,6 +59,66 @@ test("deriveFeature: neither → base branch, null key", () => {
     deriveFeature({ epicNum: null, epicTitle: null, milestoneTitle: null }, "develop"),
     { featureKey: null, branch: "develop", featureTitle: null },
   );
+});
+
+// ── ineligibleReason (pickup eligibility — mirrors docs/agents/routing.md) ───
+test("ineligibleReason: wayfinder:map label demotes, even with no sub-issues", () => {
+  const r = ineligibleReason({ labels: ["wayfinder:map"], subIssuesCount: 0 });
+  assert.match(r ?? "", /wayfinder:map/);
+  assert.match(r ?? "", /routing\.md/);
+});
+test("ineligibleReason: native sub-issues make it a parent/epic — demoted", () => {
+  const r = ineligibleReason({ labels: ["ready-for-agent"], subIssuesCount: 6 });
+  assert.match(r ?? "", /parent\/epic with sub-issues/);
+  assert.match(r ?? "", /only slices are AFK-eligible/);
+});
+test("ineligibleReason: grilling and prototype are HITL — demoted, reason names the label", () => {
+  assert.match(ineligibleReason({ labels: ["wayfinder:grilling"], subIssuesCount: 0 }) ?? "", /wayfinder:grilling/);
+  assert.match(ineligibleReason({ labels: ["wayfinder:prototype"], subIssuesCount: 0 }) ?? "", /wayfinder:prototype/);
+});
+test("ineligibleReason: a plain slice is eligible", () => {
+  assert.equal(ineligibleReason({ labels: ["ready-for-agent", "wayfinder:task"], subIssuesCount: 0 }), null);
+});
+
+// ── liveVerifyRequested ───────────────────────────────────────────────────────
+test("liveVerifyRequested: matches 'Verify (live' in any case/spacing", () => {
+  assert.equal(liveVerifyRequested("## Acceptance\nVerify (live): open the dashboard and check the widget."), true);
+  assert.equal(liveVerifyRequested("please verify (live, against staging) before merging"), true);
+  assert.equal(liveVerifyRequested("VERIFY  (LIVE) required"), true);
+});
+test("liveVerifyRequested: does not match without the paren or in identifiers", () => {
+  assert.equal(liveVerifyRequested("verify live behavior manually"), false);
+  assert.equal(liveVerifyRequested("call `liveVerify(spec)` in the test"), false);
+  assert.equal(liveVerifyRequested(""), false);
+});
+
+// ── resolveBlockers: native precedence over body text ─────────────────────────
+test("resolveBlockers: an OPEN native blocker blocks — body text ignored", () => {
+  const r = resolveBlockers([{ number: 380, state: "OPEN" }, { number: 379, state: "CLOSED" }], "## Blocked by\nNone");
+  assert.deepEqual(r, { source: "native", blocked: true, open: [380] });
+});
+test("resolveBlockers: all native blockers CLOSED → unblocked, no body fallback", () => {
+  const r = resolveBlockers([{ number: 12, state: "CLOSED" }], "## Blocked by\n#99");
+  assert.deepEqual(r, { source: "native", blocked: false, open: [] });
+});
+test("resolveBlockers: no native blockers → falls back to the body parse", () => {
+  assert.deepEqual(resolveBlockers([], "## Blocked by\n#12"), { source: "body", refs: [12], freeText: false });
+  assert.deepEqual(resolveBlockers(null, "## Blocked by\nthe auth thing"), { source: "body", refs: [], freeText: true });
+  assert.deepEqual(resolveBlockers(null, "just a body"), { source: "body", refs: [], freeText: false });
+});
+
+// ── resolveParentIssue: native sub-issue parent precedence ────────────────────
+test("resolveParentIssue: native parent wins over the body `## Parent` section", () => {
+  assert.deepEqual(
+    resolveParentIssue({ number: 377, title: "Wayfinder: Port Act 2" }, "## Parent\n#42"),
+    { num: 377, title: "Wayfinder: Port Act 2" },
+  );
+});
+test("resolveParentIssue: no native parent → body parse (title left for the caller to fetch)", () => {
+  assert.deepEqual(resolveParentIssue(null, "## Parent\n#42"), { num: 42, title: null });
+});
+test("resolveParentIssue: neither → null", () => {
+  assert.equal(resolveParentIssue(null, "no parent here"), null);
 });
 
 // ── classify ──────────────────────────────────────────────────────────────────
