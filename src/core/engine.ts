@@ -49,12 +49,12 @@ export function routeReview(err: unknown, review: unknown):
   | { action: "rethrow" }
   | { action: "escalate"; reason: string }
   | { action: "proceed"; warn?: string } {
-  if (err != null) {
-    if (isRateLimit(err)) return { action: "rethrow" };
-    return { action: "proceed", warn: String((err as Error)?.message ?? err).split("\n")[0] };
-  }
+  // Precedence: rate limit (must bubble up) → severe finding (a reviewer that wrote a severe
+  // review.json and THEN errored still blocks the landing) → other error → clean proceed.
+  if (err != null && isRateLimit(err)) return { action: "rethrow" };
   const severe = (review as { severe?: unknown } | null)?.severe;
   if (typeof severe === "string" && severe.trim() !== "") return { action: "escalate", reason: severe };
+  if (err != null) return { action: "proceed", warn: String((err as Error)?.message ?? err).split("\n")[0] };
   return { action: "proceed" };
 }
 
@@ -96,6 +96,14 @@ export function mergeInWorktree(
   } finally {
     try { G(["worktree", "remove", "--force", wt]); } catch { /* leftovers reaped by cleanStartup */ }
   }
+}
+
+/** Union two child-issue lists, deduped by issue number (first list wins on overlap). Pure —
+ *  unit-tested. `featureChildren` uses it to merge body-text `## Parent` matches with the epic's
+ *  NATIVE sub-issues, which the planner now groups by (body text alone misses them). */
+export function unionChildren<T extends { number: number }>(a: T[], b: T[]): T[] {
+  const seen = new Set(a.map((i) => i.number));
+  return [...a, ...b.filter((i) => !seen.has(i.number))];
 }
 
 export type EngineHooks = {
@@ -249,8 +257,14 @@ export class Engine {
    *  `ineligibleReason`) to the human queue: one comment naming the failed criterion + label swap.
    *  Lives here with `escalate` because it's a GitHub mutation — the planner only decides. */
   demote(num: number, title: string, reason: string): void {
+    // Label swap FIRST: if it fails (e.g. the human label doesn't exist in this repo) the issue
+    // stays `ready` and gets re-demoted every poll — so post no comment (spam), just warn.
+    try { gh(["issue", "edit", String(num), "--remove-label", this.cfg.labelReady, "--add-label", this.cfg.labelHuman]); }
+    catch (e) {
+      this.log(`  ⚠️  #${num}: demote label swap failed — does the \`${this.cfg.labelHuman}\` label exist in ${this.cfg.nwo}? (${String((e as Error)?.message ?? e).split("\n")[0]})`);
+      return;
+    }
     gh(["issue", "comment", String(num), "--body", `> *Posted by AFK.*\n\n${reason}`]);
-    try { gh(["issue", "edit", String(num), "--remove-label", this.cfg.labelReady, "--add-label", this.cfg.labelHuman]); } catch { /* labels may not exist */ }
     this.emit({ type: "escalation", issue: num, title, reason });
   }
 
@@ -346,7 +360,9 @@ export class Engine {
       try {
         // Bounded self-correction loop (Phase 0): re-run in the SAME sandbox when stuck on own code.
         for (let attempt = 0; attempt <= this.cfg.maxFixAttempts; attempt++) {
-          try { fs.rmSync(path.join(afk, "blocked.json"), { force: true }); } catch { /* none yet */ }
+          // Clear stale signal files — sandcastle can reuse a preserved dirty worktree, and a stale
+          // question.json would re-pause the issue / a stale summary.md would land in comments/PRs.
+          for (const f of ["blocked.json", "question.json", "summary.md"]) { try { fs.rmSync(path.join(afk, f), { force: true }); } catch { /* none yet */ } }
           const retryNote = attempt === 0 ? "" :
             `\n\n# RETRY ${attempt}/${this.cfg.maxFixAttempts}\n` +
             `A previous attempt got stuck on its OWN code (not the environment):\n${blocked?.reason ?? ""}\n${blocked?.detail ?? ""}\n` +
@@ -554,6 +570,8 @@ export class Engine {
     } catch {
       // A PR for this branch may already exist (re-run) — refresh its body and return its url.
       try { gh(["pr", "edit", p.branch, "--body", body]); } catch { /* ignore */ }
+      // The live-verify draft decision must also apply to an existing PR that's already ready.
+      if (p.liveVerify) { try { gh(["pr", "ready", p.branch, "--undo"]); } catch (e) { this.log(`  ⚠️  #${p.number}: couldn't convert the PR back to draft: ${String((e as Error)?.message ?? e).split("\n")[0]}`); } }
       try { url = gh(["pr", "view", p.branch, "--json", "url", "-q", ".url"]).trim(); } catch { url = null; }
     }
     if (url && p.liveVerify) this.addLiveVerifyLabel(p.branch, `#${p.number}`);
@@ -588,6 +606,7 @@ export class Engine {
       // Resolved iff the resolver committed the merge and didn't bail.
       return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.baseRef());
     } catch (e) {
+      if (isRateLimit(e)) throw e;
       this.log(`  ⚠️  Resolver failed for #${p.number}: ${(e as Error)?.message ?? e}`);
       return false;
     } finally {
@@ -609,14 +628,33 @@ export class Engine {
       } else {
         const epicNum = feature.key.replace("epic-", "");
         const re = new RegExp(`/issues/${epicNum}\\b|#${epicNum}\\b`);
-        all = (JSON.parse(gh(["issue", "list", "--state", "all", "--json", "number,state,body,labels", "--limit", "200"])) as typeof all)
+        const bodyMatched = (JSON.parse(gh(["issue", "list", "--state", "all", "--json", "number,state,body,labels", "--limit", "200"])) as typeof all)
           .filter((i) => /##\s*Parent/i.test(i.body ?? "") && re.test(i.body ?? ""));
+        all = unionChildren(bodyMatched, this.epicSubIssues(Number(epicNum)));
       }
       const hasReady = (i: { labels?: { name: string }[] }) => (i.labels ?? []).some((l) => l.name === this.cfg.labelReady);
       const openReady = all.filter((i) => i.state === "OPEN" && hasReady(i)).map((i) => i.number);
       const landed = all.filter((i) => i.state === "CLOSED").map((i) => i.number);
       return { openReady, landed };
     } catch { return { openReady: [], landed: [] }; }
+  }
+
+  /** The epic's NATIVE sub-issues via one GraphQL query — the planner groups children this way, so
+   *  body-text `## Parent` matches alone would miss them (→ premature `isFeatureComplete`). GraphQL
+   *  issue state is `OPEN`/`CLOSED`, same as the REST path. A failure degrades to body-text-only
+   *  children with one warning — never throws. */
+  private epicSubIssues(epicNum: number): { number: number; state: string; labels?: { name: string }[] }[] {
+    const [owner, name] = this.cfg.nwo.split("/");
+    try {
+      const data = JSON.parse(gh(["api", "graphql", "-f",
+        `query=query { repository(owner: "${owner}", name: "${name}") { issue(number: ${epicNum}) { subIssues(first: 100) { nodes { number state labels(first: 20) { nodes { name } } } } } } }`]));
+      return (data?.data?.repository?.issue?.subIssues?.nodes ?? []).map((n: any) => ({
+        number: n.number, state: n.state, labels: (n.labels?.nodes ?? []).map((l: any) => ({ name: l.name })),
+      }));
+    } catch (e) {
+      this.log(`  ⚠️  couldn't fetch native sub-issues for epic #${epicNum} (${String((e as Error)?.message ?? e).split("\n")[0]}) — using body-text \`## Parent\` children only.`);
+      return [];
+    }
   }
 
   /** Authoritative landed-children set: this run's merges ∪ GitHub's closed children, deduped. */
@@ -694,8 +732,21 @@ export class Engine {
   /** Open (or refresh) the single PR for a feature. Ready iff verified green or honestly unverified. */
   async openFeaturePR(feature: Feature, v: { verdict: Verdict | null; unverifiedReason: string | null; evidenceMd: string }): Promise<string | null> {
     if (feature.branch === this.cfg.baseBranch || feature.merged.length === 0) return null;
-    // Push by refspec — no host checkout is ever needed to publish the feature branch.
-    try { git(["push", "origin", feature.branch]); } catch { /* may be up to date */ }
+    // Push by refspec — no host checkout is ever needed to publish the feature branch. A failed
+    // push is only benign when origin already has our HEAD; otherwise the PR head is stale and
+    // must NOT be promoted to ready (the verified commits never reached origin).
+    let pushFailed = false;
+    try { git(["push", "origin", feature.branch]); }
+    catch (e) {
+      const upToDate = (() => {
+        try { return git(["rev-parse", `refs/remotes/origin/${feature.branch}`]).trim() === git(["rev-parse", feature.branch]).trim(); }
+        catch { return false; }
+      })();
+      if (!upToDate) {
+        pushFailed = true;
+        this.log(`  ⚠️  ${feature.branch}: push failed (${String((e as Error)?.message ?? e).split("\n")[0]}) — the PR head is stale, keeping it a draft.`);
+      }
+    }
 
     const incomplete = this.featureChildren(feature).openReady.length > 0;
     const closes = this.landedChildren(feature).map((n) => `Closes #${n}`).join("\n");
@@ -709,6 +760,10 @@ export class Engine {
     const livePending = feature.liveVerify.length > 0;
     if (livePending) {
       status += `\n\n🔬 **Draft pending a live verification pass** — requested via \`Verify (live)\` in ${feature.liveVerify.map((n) => `#${n}`).join(", ")}.`;
+      state = "draft";
+    }
+    if (pushFailed) {
+      status += `\n\n⚠️ **push failed — PR head is stale.** The locally verified commits never reached origin; push \`${feature.branch}\` manually and re-run.`;
       state = "draft";
     }
 
@@ -727,8 +782,25 @@ export class Engine {
       return gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", branch, "--title", `feat: ${title}`, "--body", body, ...(draft ? ["--draft"] : [])]).trim();
     } catch {
       try { gh(["pr", "edit", branch, "--body", body]); } catch { /* ignore */ }
-      if (!draft) { try { gh(["pr", "ready", branch]); } catch { /* already ready */ } }
+      if (!draft) {
+        // The durable hold lives on the PR itself: batch runs have no reconcile, so in-memory
+        // `liveVerify` may be empty — the label blocks promotion until a human removes it.
+        if (this.prHasLiveHold(branch)) this.log(`  🔬 ${branch}: ${LIVE_VERIFY_LABEL} is on the PR — keeping it a draft until a human removes the label.`);
+        else { try { gh(["pr", "ready", branch]); } catch { /* already ready */ } }
+      } else {
+        // A draft decision must also apply to a PR that's already ready.
+        try { gh(["pr", "ready", branch, "--undo"]); } catch (e) { this.log(`  ⚠️  ${branch}: couldn't convert the PR back to draft: ${String((e as Error)?.message ?? e).split("\n")[0]}`); }
+      }
       try { return gh(["pr", "view", branch, "--json", "url", "-q", ".url"]).trim(); } catch { return null; }
     }
+  }
+
+  /** True when the PR on `branch` carries the durable `verify:live-pending` hold label. A read
+   *  failure returns false (same promotion behavior as before the label check existed). */
+  private prHasLiveHold(branch: string): boolean {
+    try {
+      const labels: { name: string }[] = JSON.parse(gh(["pr", "view", branch, "--json", "labels"]))?.labels ?? [];
+      return labels.some((l) => l.name === LIVE_VERIFY_LABEL);
+    } catch { return false; }
   }
 }

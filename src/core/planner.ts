@@ -103,27 +103,48 @@ export const liveVerifyRequested = (body: string): boolean => /verify\s*\(live/i
 
 /**
  * Fetch native metadata for all candidates in ONE batched GraphQL query (aliases per issue) —
- * no N round trips. A failed query degrades to the body-text fallback for the whole batch.
+ * no N round trips. `gh api graphql` exits non-zero whenever the response carries an `errors`
+ * array — even with partial `data` (e.g. ONE deleted/transferred issue alias) — so on failure we
+ * recover the response from the error's `.stdout` and use whatever parsed: only issues MISSING
+ * from it fall back to body text. A fully unparseable response degrades to the body-text fallback
+ * for the whole batch.
  */
 function fetchNativeMeta(nwo: string, numbers: number[], log: (m: string) => void): Map<number, NativeMeta> {
   const meta = new Map<number, NativeMeta>();
   if (numbers.length === 0) return meta;
   const [owner, name] = nwo.split("/");
   const fields = numbers
-    .map((n) => `i${n}: issue(number: ${n}) { number blockedBy(first: 50) { nodes { number state } } parent { number title } subIssues(first: 1) { totalCount } }`)
+    .map((n) => `i${n}: issue(number: ${n}) { number blockedBy(first: 50) { nodes { number state } } parent { number title repository { nameWithOwner } } subIssues(first: 1) { totalCount } }`)
     .join("\n");
+  let data: any = null;
   try {
-    const data = JSON.parse(gh(["api", "graphql", "-f", `query=query { repository(owner: "${owner}", name: "${name}") {\n${fields}\n} }`]));
-    for (const v of Object.values<any>(data?.data?.repository ?? {})) {
-      if (!v?.number) continue;
-      meta.set(v.number, {
-        blockedBy: (v.blockedBy?.nodes ?? []).map((b: any) => ({ number: b.number, state: b.state })),
-        parent: v.parent ? { number: v.parent.number, title: v.parent.title } : null,
-        subIssuesCount: v.subIssues?.totalCount ?? 0,
-      });
-    }
+    data = JSON.parse(gh(["api", "graphql", "-f", `query=query { repository(owner: "${owner}", name: "${name}") {\n${fields}\n} }`]));
   } catch (e) {
-    log(`⚠️  Couldn't fetch native issue metadata (${String((e as Error)?.message ?? e).split("\n")[0]}) — falling back to body-text parsing for this round.`);
+    const line = String((e as Error)?.message ?? e).split("\n")[0];
+    // execFileSync errors carry the process's stdout (utf8 per `gh()`) — recover the partial data.
+    try { data = JSON.parse((e as { stdout?: string })?.stdout ?? ""); } catch { data = null; }
+    if (data?.data?.repository) {
+      log(`⚠️  Native issue metadata came back partial (${line}) — issues missing from the response fall back to body-text parsing.`);
+    } else {
+      data = null;
+      log(`⚠️  Couldn't fetch native issue metadata (${line}) — falling back to body-text parsing for this round.`);
+    }
+  }
+  for (const v of Object.values<any>(data?.data?.repository ?? {})) {
+    if (!v?.number) continue;
+    // A native parent can live in ANOTHER repo — downstream featureChildren/parentTitle would query
+    // its number in THIS repo, so treat a cross-repo parent as no native parent (body fallback).
+    let parent = v.parent ? { number: v.parent.number, title: v.parent.title } : null;
+    const parentRepo: string | undefined = v.parent?.repository?.nameWithOwner;
+    if (parent && parentRepo && parentRepo.toLowerCase() !== nwo.toLowerCase()) {
+      log(`#${v.number}: native parent #${parent.number} lives in ${parentRepo}, not ${nwo} — ignoring it (body-text fallback).`);
+      parent = null;
+    }
+    meta.set(v.number, {
+      blockedBy: (v.blockedBy?.nodes ?? []).map((b: any) => ({ number: b.number, state: b.state })),
+      parent,
+      subIssuesCount: v.subIssues?.totalCount ?? 0,
+    });
   }
   return meta;
 }
@@ -170,6 +191,9 @@ export type PickDeps = {
   onAmbiguous: (issueNumber: number, reason: string) => void;
   /** Called for an issue that fails the pickup-eligibility contract — swap labels + comment. */
   onDemote: (issueNumber: number, reason: string) => void;
+  /** Issues being worked on RIGHT NOW (daemon pool) — skipped entirely, so an issue that becomes
+   *  ineligible mid-implement isn't demoted under its running worker. `afk run` needn't pass it. */
+  inFlight?: Set<number>;
   log?: (m: string) => void;
 };
 
@@ -185,6 +209,7 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
   const meta = fetchNativeMeta(deps.nwo, ready.map((i) => i.number), log);
   const out: Picked[] = [];
   for (const i of ready) {
+    if (deps.inFlight?.has(i.number)) continue; // its worker is running — no demote, no re-pick
     const body = i.body ?? "";
     const m = meta.get(i.number);
 

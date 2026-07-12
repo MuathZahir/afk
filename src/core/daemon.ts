@@ -98,7 +98,8 @@ export class Daemon {
         nwo: this.cfg.nwo,
         onAmbiguous: (n, reason) => this.engine.escalate(n, `#${n}`, reason),
         onDemote: (n, reason) => this.engine.demote(n, `#${n}`, reason),
-      }).filter((p) => !this.inFlight.has(p.number));
+        inFlight: this.inFlight, // skipped inside pick(), so a running issue is never demoted mid-implement
+      });
     }
     try { ready = JSON.parse(gh(["issue", "list", "--label", this.cfg.labelReady, "--state", "open", "--json", "number"])).length; } catch { /* ignore */ }
     this.store.append({ type: "poll", ready, picked: picked.length });
@@ -183,7 +184,12 @@ export class Daemon {
     const feature = [...this.engine.features.values()].find((f) => f.key === featureKey);
     if (!feature) return { ok: false, error: "unknown feature" };
     try {
-      gh(["pr", "merge", feature.branch, "--squash", "--delete-branch"]);
+      // No `--delete-branch`: it also deletes the LOCAL branch and checks out the default branch
+      // in the HOST tree when that branch is checked out there. Delete only the remote ref; local
+      // branches are the user's (afk/* are reaped by cleanStartup).
+      gh(["pr", "merge", feature.branch, "--squash"]);
+      try { gh(["api", "--method", "DELETE", `repos/${this.cfg.nwo}/git/refs/heads/${feature.branch}`]); }
+      catch (e) { console.log(`  ⚠️  merged, but couldn't delete the remote branch ${feature.branch}: ${String((e as Error)?.message ?? e).split("\n")[0]}`); }
       this.store.append({ type: "feature-state", feature: feature.key, title: feature.title, state: "merged" });
       return { ok: true };
     } catch (e) { return { ok: false, error: String((e as Error)?.message ?? e) }; }

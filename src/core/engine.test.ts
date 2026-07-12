@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { looseIssue, mergeInWorktree, routeReview } from "./engine.js";
+import { looseIssue, mergeInWorktree, routeReview, unionChildren } from "./engine.js";
 import { deriveFeature } from "./planner.js";
 
 const G = (dir: string, args: string[]) =>
@@ -128,10 +128,29 @@ test("routeReview: any other reviewer error → proceed to landing, first error 
   const r = routeReview(new Error("worker stalled (idle > 10m)\nstack trace..."), null);
   assert.deepEqual(r, { action: "proceed", warn: "worker stalled (idle > 10m)" });
 });
+test("routeReview: reviewer wrote a severe finding and THEN errored → the finding still escalates", () => {
+  assert.deepEqual(routeReview(new Error("worker stalled (idle > 10m)"), { severe: "auth bypass in the new route" }),
+    { action: "escalate", reason: "auth bypass in the new route" });
+});
 test("routeReview: clean run — no review.json, or one without a real severe reason → proceed", () => {
   assert.deepEqual(routeReview(null, null), { action: "proceed" });
   assert.deepEqual(routeReview(null, {}), { action: "proceed" });
   assert.deepEqual(routeReview(null, { severe: "" }), { action: "proceed" });
   assert.deepEqual(routeReview(null, { severe: "   " }), { action: "proceed" });
   assert.deepEqual(routeReview(null, { severe: 42 }), { action: "proceed" });
+});
+
+// ── unionChildren: featureChildren must see NATIVE sub-issue children too ────
+// Planted regression: with body-text-only matching, a native-only sibling slice is invisible →
+// isFeatureComplete goes true after the first child lands → premature verify + ready feature PR.
+test("unionChildren: body-text matches ∪ native sub-issues, deduped by number, body entry wins", () => {
+  const body = [{ number: 1, state: "CLOSED" }, { number: 2, state: "OPEN" }];
+  const native = [{ number: 2, state: "CLOSED" }, { number: 3, state: "OPEN" }];
+  assert.deepEqual(unionChildren(body, native),
+    [{ number: 1, state: "CLOSED" }, { number: 2, state: "OPEN" }, { number: 3, state: "OPEN" }]);
+});
+test("unionChildren: either side empty passes the other through", () => {
+  const kids = [{ number: 7, state: "OPEN" }];
+  assert.deepEqual(unionChildren([], kids), kids);
+  assert.deepEqual(unionChildren(kids, []), kids);
 });

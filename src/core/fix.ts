@@ -44,7 +44,9 @@ async function runOnFeature(
     });
     opts.onActivity?.("✅ setup done — launching the agent");
     const afk = path.join(sandbox.worktreePath, ".afk");
-    try { fs.rmSync(path.join(afk, "blocked.json"), { force: true }); } catch { /* none */ }
+    // Clear stale signal files — a preserved dirty worktree can be reused, and stale
+    // question.json/summary.md must never leak into a later read.
+    for (const f of ["blocked.json", "question.json", "summary.md"]) { try { fs.rmSync(path.join(afk, f), { force: true }); } catch { /* none */ } }
     const r = await sandbox.run({
       name,
       agent: sandcastle.claudeCode(model, { env: { CLAUDE_CODE_OAUTH_TOKEN: cfg.oauth } }),
