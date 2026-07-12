@@ -71,7 +71,8 @@ export function streamLogging(logPath: string, onLine: (line: string) => void): 
   const onAgentStreamEvent = (e: AgentStreamEvent) => {
     try {
       if (e.type === "text") { buf += e.message; if (buf.length > 240 || buf.includes("\n")) flush(); }
-      else { flush(); const a = (e.formattedArgs || "").replace(/\s+/g, " ").slice(0, 120); onLine(`🔧 ${e.name}${a ? " " + a : ""}`); }
+      else if (e.type === "toolCall") { flush(); const a = (e.formattedArgs || "").replace(/\s+/g, " ").slice(0, 120); onLine(`🔧 ${e.name}${a ? " " + a : ""}`); }
+      // "raw" (verbose-only, added in sandcastle 0.10) is ignored — afk never enables verbose logging.
     } catch { /* a slow consumer must never break the run */ }
   };
   return { type: "file", path: logPath, onAgentStreamEvent };
