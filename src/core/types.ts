@@ -61,20 +61,26 @@ export type Picked = {
   number: number;
   title: string;
   branch: string;       // afk/issue-<n>
-  feature: string;      // feat/<...> or the base branch (legacy)
+  feature: string;      // feat/<...> or the issue's base branch (legacy)
   featureKey: string | null; // stable id of the owning feature (epic#/slug or milestone), null = base
   featureTitle: string | null;
+  /** The long-lived branch this issue forks from and PRs against — resolved by the planner
+   *  (epic `Base:` line → own `Base:` line → config `baseBranch`). */
+  base: string;
+  /** Where `base` was declared, for human-facing messages (e.g. "the `Base:` line in epic #377"). */
+  baseSource: string;
   /** Issue body asked for a live verification pass (`Verify (live)…`) → its PR opens as a draft. */
   liveVerify: boolean;
 };
 
-/** `liveVerify` = landed children that requested a live pass → the feature PR stays draft. */
-export type Feature = { key: string; title: string; branch: string; merged: number[]; liveVerify: number[] };
+/** `liveVerify` = landed children that requested a live pass → the feature PR stays draft.
+ *  `base` = the long-lived branch the feature forks from and its PR targets. */
+export type Feature = { key: string; title: string; branch: string; base: string; merged: number[]; liveVerify: number[] };
 
 // ── per-issue/feature outcomes ────────────────────────────────────────────────
 export type IssueStatus =
   | "merged" | "rescued" | "blocked" | "timeout" | "conflict" | "no-commits" | "error" | "question" | "stopped";
-export type Result = { num: number; title: string; status: IssueStatus; feature: string; media?: number };
+export type Result = { num: number; title: string; status: IssueStatus; feature: string; base: string; media?: number };
 
 // ── verification (Phase 1) ─────────────────────────────────────────────────────
 export type CriterionVerdict = { criterion: string; pass: boolean; evidence?: string };

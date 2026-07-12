@@ -172,25 +172,35 @@ export class Engine {
     try { return Number(git(["rev-list", "--count", `${base}..${branch}`]).trim()) > 0; } catch { return false; }
   }
 
-  /** Freshen `origin/<base>` — a plain fetch, so the host tree is untouched. Offline / no remote is
-   *  fine: new branches then fork from the local base instead. */
-  private fetchBase(): void {
-    try { git(["fetch", "origin", this.cfg.baseBranch]); } catch { /* offline / no remote — fall back to local base */ }
+  /** Bases already fetched this round — a round may span multiple bases; each DISTINCT base is
+   *  fetched once per round, not once per issue. Cleared by `beginRound()`. */
+  private fetchedBases = new Set<string>();
+  /** Reset the per-round base-fetch dedupe. Drivers call this at the start of each planning round. */
+  beginRound(): void { this.fetchedBases.clear(); }
+
+  /** Freshen `origin/<base>` — a plain fetch, so the host tree is untouched. Deduped per round.
+   *  Offline / no remote is fine: the config default then forks from the local base instead. */
+  private fetchBase(base: string): void {
+    if (this.fetchedBases.has(base)) return;
+    this.fetchedBases.add(base);
+    try { git(["fetch", "origin", base]); } catch { /* offline / no remote — fall back to local base */ }
   }
   /** The ref new feature/issue branches fork from: `origin/<base>` when it exists (fresh after
-   *  `fetchBase`), falling back to the local base (e.g. a fresh repo with no remote ref yet). */
-  private baseRef(): string {
-    try { git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${this.cfg.baseBranch}`]); return `origin/${this.cfg.baseBranch}`; }
-    catch { return this.cfg.baseBranch; }
+   *  `fetchBase`). When it doesn't, only the CONFIG default may fall back to the local branch (the
+   *  fresh-repo case); an explicitly declared base gets NO fallback — null means the base is
+   *  invalid (typo'd `Base:` line) and the caller must escalate instead of running the issue. */
+  private baseRef(base: string): string | null {
+    try { git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${base}`]); return `origin/${base}`; }
+    catch { return base === this.cfg.baseBranch ? base : null; }
   }
 
-  private ensureFeatureBranch(fb: string): void {
-    if (fb === this.cfg.baseBranch || this.featureBranchReady.has(fb)) return;
+  private ensureFeatureBranch(fb: string, base: string, forkRef: string): void {
+    if (fb === base || this.featureBranchReady.has(fb)) return;
     const localExists = git(["branch", "--list", fb]).trim() !== "";
     if (!localExists) {
       const onOrigin = (() => { try { return git(["ls-remote", "--heads", "origin", fb]).trim() !== ""; } catch { return false; } })();
-      if (onOrigin) { try { git(["fetch", "origin", `${fb}:${fb}`]); } catch { git(["branch", fb, this.baseRef()]); } }
-      else git(["branch", fb, this.baseRef()]);
+      if (onOrigin) { try { git(["fetch", "origin", `${fb}:${fb}`]); } catch { git(["branch", fb, forkRef]); } }
+      else git(["branch", fb, forkRef]);
     }
     this.featureBranchReady.add(fb);
   }
@@ -317,14 +327,24 @@ export class Engine {
   // ── per-issue pipeline ────────────────────────────────────────────────────────
   async processIssue(p: Picked): Promise<Result> {
     const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
-    const loose = looseIssue(p, this.cfg.baseBranch);
-    // Fresh fork point, no host checkout: fetch origin/<base>, then fork the issue branch from the
-    // feature branch (grouped) or straight from origin/<base> (loose).
-    const forkRef = await this.withGitLock(() => {
-      this.fetchBase();
-      this.ensureFeatureBranch(p.feature);
-      return loose ? this.baseRef() : p.feature;
+    const loose = looseIssue(p, p.base);
+    // Fresh fork point, no host checkout: fetch origin/<base> (the ISSUE's base), then fork the
+    // issue branch from the feature branch (grouped) or straight from origin/<base> (loose).
+    const forkRef = await this.withGitLock((): string | null => {
+      this.fetchBase(p.base);
+      const ref = this.baseRef(p.base);
+      if (ref === null) return null; // declared base doesn't exist on origin — escalate below
+      this.ensureFeatureBranch(p.feature, p.base, ref);
+      return loose ? ref : p.feature;
     });
+    if (forkRef === null) {
+      // A typo'd `Base:` line — running would fork and PR against the WRONG (nonexistent) branch.
+      this.escalate(p.number, p.title,
+        `The declared base branch \`${p.base}\` doesn't exist on origin (declared via ${p.baseSource}).`,
+        "\nFix the branch name (or push the branch), then re-queue the issue.");
+      this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
+      return { num: p.number, title: p.title, status: "error", feature: p.feature, base: p.base };
+    }
     this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "implementing" });
     // Surface the feature node immediately (with its real title) so an in-flight epic child shows up
     // in the tree right away, not only once something merges.
@@ -394,7 +414,7 @@ export class Engine {
         // run re-picks it. (The label was never removed, so it's still in the queue.)
         if (this.shuttingDown) {
           this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "queued", note: "daemon stopped mid-run — will resume on next start" });
-          return done({ num: p.number, title: p.title, status: "stopped", feature: p.feature });
+          return done({ num: p.number, title: p.title, status: "stopped", feature: p.feature, base: p.base });
         }
         if (sandbox && !this.branchAhead(p.branch, forkRef)) this.rescueUncommitted(sandbox.worktreePath, p);
         const userStopped = this.stoppedIds.has(agentId);
@@ -407,7 +427,7 @@ export class Engine {
         preserve = this.escalate(p.number, p.title, reason, userStopped ? "" : `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, wb);
         const status: "stopped" | "timeout" | "error" = userStopped ? "stopped" : ac.signal.aborted ? "timeout" : "error";
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: status });
-        return done({ num: p.number, title: p.title, status, feature: p.feature });
+        return done({ num: p.number, title: p.title, status, feature: p.feature, base: p.base });
       } finally { clearTimeout(timer); this.controllers.delete(agentId); }
 
       const summary = readText(path.join(afk, "summary.md")) ?? "_(worker wrote no summary)_";
@@ -423,24 +443,24 @@ export class Engine {
       if (question?.question) {
         preserve = this.ask(p, question, workBranch);
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "question" });
-        return done({ num: p.number, title: p.title, status: "question", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "question", feature: p.feature, base: p.base });
       }
 
       if (commits === 0 && !blocked) {
         this.escalate(p.number, p.title, "The worker produced no commits and left no uncommitted work to recover.");
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
-        return done({ num: p.number, title: p.title, status: "no-commits", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "no-commits", feature: p.feature, base: p.base });
       }
       if (blocked) {
         preserve = this.escalate(p.number, p.title, `The worker bailed: ${blocked.reason ?? "blocked"}.`, blocked.detail ? `\n${blocked.detail}` : "", workBranch);
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "blocked" });
-        return done({ num: p.number, title: p.title, status: "blocked", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "blocked", feature: p.feature, base: p.base });
       }
       if (rescued) {
         preserve = this.escalate(p.number, p.title, "Worker finished without committing — host recovered its uncommitted work.",
           "The recovered changes are **not** verified — review the feature branch before merging.", workBranch);
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "rescued" });
-        return done({ num: p.number, title: p.title, status: "rescued", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "rescued", feature: p.feature, base: p.base });
       }
 
       // ── review: best-effort second pair of eyes in the SAME warm sandbox, before any landing ──
@@ -450,16 +470,16 @@ export class Engine {
       if (severe) {
         preserve = this.escalate(p.number, p.title, `The Reviewer flagged a severe problem it couldn't safely fix: ${severe}`, "", p.branch);
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
-        return done({ num: p.number, title: p.title, status: "blocked", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "blocked", feature: p.feature, base: p.base });
       }
 
       // ── land: loose issue → its own PR to the base branch (no local merge, ever) ──
       if (loose) {
         const url = this.openIssuePR(p, summary);
         if (!url) {
-          preserve = this.escalate(p.number, p.title, `Implemented \`${p.branch}\` but couldn't push it / open its PR against \`${this.cfg.baseBranch}\`.`, "", workBranch);
+          preserve = this.escalate(p.number, p.title, `Implemented \`${p.branch}\` but couldn't push it / open its PR against \`${p.base}\`.`, "", workBranch);
           this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "error" });
-          return done({ num: p.number, title: p.title, status: "error", feature: p.feature });
+          return done({ num: p.number, title: p.title, status: "error", feature: p.feature, base: p.base });
         }
         landed = true;
         // The PR body's `Closes #N` closes the issue when it merges — don't close it here.
@@ -467,7 +487,7 @@ export class Engine {
         gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — PR opened: ${url}**${liveNote}\n\n${summary}`]);
         try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
-        return done({ num: p.number, title: p.title, status: "merged", feature: p.feature });
+        return done({ num: p.number, title: p.title, status: "merged", feature: p.feature, base: p.base });
       }
 
       // ── grouped: merge issue branch → feature branch in a throwaway worktree; conflict → Resolver ──
@@ -484,13 +504,13 @@ export class Engine {
         const st = merge === "conflict" ? "conflict" : "error";
         preserve = this.escalate(p.number, p.title, failReason, "", workBranch);
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: st });
-        return done({ num: p.number, title: p.title, status: st, feature: p.feature });
+        return done({ num: p.number, title: p.title, status: st, feature: p.feature, base: p.base });
       }
       landed = true;
 
       // track for the feature PR + verify trigger; comment + close the issue
       if (p.featureKey) {
-        const f = this.features.get(p.feature) ?? { key: p.featureKey, title: p.featureTitle ?? p.featureKey, branch: p.feature, merged: [], liveVerify: [] };
+        const f = this.features.get(p.feature) ?? { key: p.featureKey, title: p.featureTitle ?? p.featureKey, branch: p.feature, base: p.base, merged: [], liveVerify: [] };
         f.merged.push(p.number);
         if (p.liveVerify) f.liveVerify.push(p.number);
         this.features.set(p.feature, f);
@@ -500,7 +520,7 @@ export class Engine {
       try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
       gh(["issue", "close", String(p.number)]);
       this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
-      return done({ num: p.number, title: p.title, status: "merged", feature: p.feature });
+      return done({ num: p.number, title: p.title, status: "merged", feature: p.feature, base: p.base });
     } finally {
       const wt = sandbox?.worktreePath;
       if (sandbox) await sandbox.close().catch(() => {});
@@ -566,7 +586,7 @@ export class Engine {
     const body = `> *Opened by AFK.*\n\nCloses #${p.number}${liveNote}\n\n${summary}`;
     let url: string | null;
     try {
-      url = gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", p.branch, "--title", `feat: ${p.title} (#${p.number})`, "--body", body, ...(p.liveVerify ? ["--draft"] : [])]).trim();
+      url = gh(["pr", "create", "--base", p.base, "--head", p.branch, "--title", `feat: ${p.title} (#${p.number})`, "--body", body, ...(p.liveVerify ? ["--draft"] : [])]).trim();
     } catch {
       // A PR for this branch may already exist (re-run) — refresh its body and return its url.
       try { gh(["pr", "edit", p.branch, "--body", body]); } catch { /* ignore */ }
@@ -604,7 +624,7 @@ export class Engine {
         runResolver(this.cfg, p.feature, p.branch, issueJson, { signal, onActivity: (l) => this.activity(id, l) }),
       );
       // Resolved iff the resolver committed the merge and didn't bail.
-      return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.baseRef());
+      return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.baseRef(p.base) ?? p.base);
     } catch (e) {
       if (isRateLimit(e)) throw e;
       this.log(`  ⚠️  Resolver failed for #${p.number}: ${(e as Error)?.message ?? e}`);
@@ -681,7 +701,7 @@ export class Engine {
    * Returns the final verdict (or null when unverified/escalated). Safe to call once per feature.
    */
   async finalizeFeature(feature: Feature): Promise<void> {
-    if (feature.branch === this.cfg.baseBranch) return; // legacy: no PR for base-branch merges
+    if (feature.branch === feature.base) return; // legacy: no PR for base-branch merges
     const issuesJson = this.featureIssuesJson(feature);
     this.emit({ type: "feature-state", feature: feature.key, title: feature.title, state: "verifying" });
     this.log(`\n🔎 Verifying feature ${feature.title} (${feature.branch})…`);
@@ -731,7 +751,7 @@ export class Engine {
 
   /** Open (or refresh) the single PR for a feature. Ready iff verified green or honestly unverified. */
   async openFeaturePR(feature: Feature, v: { verdict: Verdict | null; unverifiedReason: string | null; evidenceMd: string }): Promise<string | null> {
-    if (feature.branch === this.cfg.baseBranch || feature.merged.length === 0) return null;
+    if (feature.branch === feature.base || feature.merged.length === 0) return null;
     // Push by refspec — no host checkout is ever needed to publish the feature branch. A failed
     // push is only benign when origin already has our HEAD; otherwise the PR head is stale and
     // must NOT be promoted to ready (the verified commits never reached origin).
@@ -768,7 +788,7 @@ export class Engine {
     }
 
     const body = `> *Opened by AFK.*\n\nImplements **${feature.title}**.\n\n${closes}\n\n${status}`;
-    const url = this.createOrUpdatePR(feature.branch, feature.title, body, state === "draft");
+    const url = this.createOrUpdatePR(feature.branch, feature.base, feature.title, body, state === "draft");
     if (url && livePending) this.addLiveVerifyLabel(feature.branch, feature.title);
     if (url) this.emit({ type: "pr", feature: feature.key, url, state });
     // One feature-state: building (incomplete) · verified (green) · needs-human (verify failed) · unverified.
@@ -777,9 +797,9 @@ export class Engine {
     return url;
   }
 
-  private createOrUpdatePR(branch: string, title: string, body: string, draft: boolean): string | null {
+  private createOrUpdatePR(branch: string, base: string, title: string, body: string, draft: boolean): string | null {
     try {
-      return gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", branch, "--title", `feat: ${title}`, "--body", body, ...(draft ? ["--draft"] : [])]).trim();
+      return gh(["pr", "create", "--base", base, "--head", branch, "--title", `feat: ${title}`, "--body", body, ...(draft ? ["--draft"] : [])]).trim();
     } catch {
       try { gh(["pr", "edit", branch, "--body", body]); } catch { /* ignore */ }
       if (!draft) {

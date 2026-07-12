@@ -103,6 +103,7 @@ export class Daemon {
     }
     try { ready = JSON.parse(gh(["issue", "list", "--label", this.cfg.labelReady, "--state", "open", "--json", "number"])).length; } catch { /* ignore */ }
     this.store.append({ type: "poll", ready, picked: picked.length });
+    if (picked.length > 0) this.engine.beginRound(); // fetch each DISTINCT base once this round
     for (const p of picked) this.launchIssue(p);
   }
 
@@ -137,8 +138,8 @@ export class Daemon {
    * verify interrupted by a crash gets re-run, and so the daemon won't reopen already-landed work.
    */
   private async reconcile(): Promise<void> {
-    let prs: { number: number; headRefName: string; body: string; isDraft: boolean; labels?: { name: string }[] }[] = [];
-    try { prs = JSON.parse(gh(["pr", "list", "--state", "open", "--json", "number,headRefName,body,isDraft,labels", "--limit", "100"])); } catch { return; }
+    let prs: { number: number; headRefName: string; baseRefName?: string; body: string; isDraft: boolean; labels?: { name: string }[] }[] = [];
+    try { prs = JSON.parse(gh(["pr", "list", "--state", "open", "--json", "number,headRefName,baseRefName,body,isDraft,labels", "--limit", "100"])); } catch { return; }
     let recovered = 0;
     for (const pr of prs) {
       const branch = pr.headRefName;
@@ -151,7 +152,11 @@ export class Daemon {
       // A `verify:live-pending` label on the PR survives restarts — recover the draft-holding flag
       // from it (we can't tell WHICH child asked, so attribute it to all recovered children).
       const livePending = (pr.labels ?? []).some((l) => l.name === LIVE_VERIFY_LABEL);
-      const feature: Feature = { key, title, branch, merged, liveVerify: livePending ? [...merged] : [] };
+      // The feature's base survives restarts on the PR itself. A feature without a PR isn't
+      // reconstructed here at all — its issues get re-picked and the planner re-resolves the base.
+      let base = pr.baseRefName ?? "";
+      if (!base) { base = this.cfg.baseBranch; console.log(`  ⚠️ ${branch}: open PR carries no baseRefName — assuming the config base \`${base}\`.`); }
+      const feature: Feature = { key, title, branch, base, merged, liveVerify: livePending ? [...merged] : [] };
       this.engine.features.set(branch, feature);
       recovered++;
       // A draft PR whose children have all closed = a verify we never finished. Re-finalize it.

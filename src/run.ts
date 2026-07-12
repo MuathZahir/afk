@@ -42,11 +42,12 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
     });
     if (batch.length === 0) break;
     console.log(`Round: ${batch.map((b) => `#${b.number}→${b.feature}`).join(", ")}`);
+    engine.beginRound(); // fetch each DISTINCT base once this round
     await pool(batch, cfg.maxParallel, async (p) => {
       try { results.push(await engine.processIssue(p)); }
       catch (e) {
         if (isRateLimit(e)) { stopped = true; console.error(`\n⏸  Rate limit hit — stopping cleanly. Remaining issues stay ${cfg.labelReady}.`); }
-        else { console.error(`✗ #${p.number}:`, e); engine.escalate(p.number, p.title, "Unexpected orchestrator error.", `\n\`\`\`\n${String(e).slice(0, 1500)}\n\`\`\``); results.push({ num: p.number, title: p.title, status: "error", feature: p.feature }); }
+        else { console.error(`✗ #${p.number}:`, e); engine.escalate(p.number, p.title, "Unexpected orchestrator error.", `\n\`\`\`\n${String(e).slice(0, 1500)}\n\`\`\``); results.push({ num: p.number, title: p.title, status: "error", feature: p.feature, base: p.base }); }
       }
     });
     processed += batch.length;
@@ -65,22 +66,23 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
     }
   }
 
-  writeReport(results, prFeatures, cfg.baseBranch);
+  writeReport(results, prFeatures);
 })();
 
-function writeReport(results: Result[], features: Feature[], baseBranch: string): void {
+function writeReport(results: Result[], features: Feature[]): void {
   const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥", question: "❓", stopped: "⏹️" };
   const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status} → \`${r.feature}\``);
   const mergedN = results.filter((r) => r.status === "merged").length;
-  const onFeature = results.filter((r) => r.status === "merged" && r.feature !== baseBranch).length;
-  const onBase = results.filter((r) => r.status === "merged" && r.feature === baseBranch).length;
+  // Per-effort bases: each result carries ITS base, so a loose issue on a non-config base counts right.
+  const onFeature = results.filter((r) => r.status === "merged" && r.feature !== r.base).length;
+  const onBase = results.filter((r) => r.status === "merged" && r.feature === r.base).length;
   const needHuman = results.length - mergedN;
   const summaryLine = onFeature > 0 && onBase > 0
-    ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** with their own PR to \`${baseBranch}\` (no feature), **${needHuman}** need a human.`
+    ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** with their own PR to their base branch (no feature), **${needHuman}** need a human.`
     : onFeature > 0
     ? `**${onFeature}** issue(s) landed on feature branch(es), **${needHuman}** need a human.`
     : onBase > 0
-    ? `**${onBase}** issue(s) opened their own PR to \`${baseBranch}\` (no epic/milestone), **${needHuman}** need a human.`
+    ? `**${onBase}** issue(s) opened their own PR to their base branch (no epic/milestone), **${needHuman}** need a human.`
     : `**0** issues merged, **${results.length}** need a human.`;
   const report = [
     `# AFK run report`, ``, summaryLine, ``,

@@ -149,10 +149,41 @@ function fetchNativeMeta(nwo: string, numbers: number[], log: (m: string) => voi
   return meta;
 }
 
-/** Pure feature derivation — given what we know about an issue, decide its branch + grouping key. */
+// ── per-effort base branches ─────────────────────────────────────────────────
+/** Parse a `Base: <branch>` declaration: its own line, case-insensitive, optional backticks around
+ *  the branch. First match wins. Returns null when the body declares no base. */
+export function parseBaseLine(body: string): string | null {
+  return body.match(/^base:\s*`?([\w./-]+)`?\s*$/im)?.[1] ?? null;
+}
+
+/**
+ * Pure base-precedence resolution (frozen contract):
+ *  1. Grouped issue (has epic parent): the EPIC's `Base:` line governs; the child's own `Base:`
+ *     line is IGNORED — reported back as `ignoredOwnBase` (when it differs) so the caller warns.
+ *  2. Loose issue: its own `Base:` line.
+ *  3. Fallback: the config `baseBranch`.
+ */
+export function resolveBase(input: {
+  /** The issue's own parsed `Base:` line (null = none). */
+  ownBase: string | null;
+  /** True when the issue has an epic parent (grouped). */
+  hasEpic: boolean;
+  /** The epic's parsed `Base:` line (null = epic declares none / body unavailable). Ignored when `!hasEpic`. */
+  epicBase: string | null;
+  configBase: string;
+}): { base: string; ignoredOwnBase: string | null } {
+  if (input.hasEpic) {
+    const base = input.epicBase ?? input.configBase;
+    return { base, ignoredOwnBase: input.ownBase !== null && input.ownBase !== base ? input.ownBase : null };
+  }
+  return { base: input.ownBase ?? input.configBase, ignoredOwnBase: null };
+}
+
+/** Pure feature derivation — given what we know about an issue, decide its branch + grouping key.
+ *  `base` is the issue's RESOLVED base branch (see `resolveBase`) — a loose issue's feature IS its base. */
 export function deriveFeature(
   input: { epicNum: number | null; epicTitle: string | null; milestoneTitle: string | null },
-  baseBranch: string,
+  base: string,
 ): { featureKey: string | null; branch: string; featureTitle: string | null } {
   if (input.epicNum !== null && input.epicTitle) {
     return {
@@ -164,26 +195,28 @@ export function deriveFeature(
   if (input.milestoneTitle) {
     return { featureKey: `ms-${slug(input.milestoneTitle)}`, branch: `feat/${slug(input.milestoneTitle)}`, featureTitle: input.milestoneTitle };
   }
-  return { featureKey: null, branch: baseBranch, featureTitle: null };
+  return { featureKey: null, branch: base, featureTitle: null };
 }
 
 const isClosed = (n: number): boolean =>
   JSON.parse(gh(["issue", "view", String(n), "--json", "state"])).state === "CLOSED";
 
-// Cache parent number → title so we only hit the API once per epic across a whole run.
-const parentTitleCache = new Map<number, string>();
-function parentTitle(num: number): string | null {
-  if (!parentTitleCache.has(num)) {
+// Cache parent number → {title, body} so we only hit the API once per epic across a whole run —
+// the title names the feature branch, the body carries the epic's `Base:` line.
+const parentInfoCache = new Map<number, { title: string; body: string }>();
+function parentInfo(num: number): { title: string; body: string } | null {
+  if (!parentInfoCache.has(num)) {
     try {
-      const title: string = JSON.parse(gh(["issue", "view", String(num), "--json", "title"])).title;
-      parentTitleCache.set(num, title);
-    } catch { return null; } // parent may be deleted
+      const v = JSON.parse(gh(["issue", "view", String(num), "--json", "title,body"]));
+      parentInfoCache.set(num, { title: v.title, body: v.body ?? "" });
+    } catch { return null; } // parent may be deleted — not cached, so a transient failure retries
   }
-  return parentTitleCache.get(num) ?? null;
+  return parentInfoCache.get(num) ?? null;
 }
 
 export type PickDeps = {
   labelReady: string;
+  /** The CONFIG default base — only the precedence fallback; issues/epics may override via `Base:`. */
   baseBranch: string;
   /** `owner/repo` — needed for the batched native-metadata GraphQL query. */
   nwo: string;
@@ -207,6 +240,35 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
     gh(["issue", "list", "--label", deps.labelReady, "--state", "open", "--json", "number,title,body,milestone,labels", "--limit", "100"]),
   );
   const meta = fetchNativeMeta(deps.nwo, ready.map((i) => i.number), log);
+  const byNumber = new Map(ready.map((i) => [i.number, i]));
+
+  // Memoized per-candidate parent + base resolution — the cross-base blocker warning needs a
+  // BLOCKER candidate's base too, and epic bodies are fetched once per epic (`parentInfo` cache).
+  type ResolvedIssue = {
+    epicNum: number | null; epicTitle: string | null;
+    base: string; baseSource: string; ignoredOwnBase: string | null;
+  };
+  const resolvedCache = new Map<number, ResolvedIssue>();
+  const resolveFor = (i: Issue): ResolvedIssue => {
+    const hit = resolvedCache.get(i.number);
+    if (hit) return hit;
+    const body = i.body ?? "";
+    const parent = resolveParentIssue(meta.get(i.number)?.parent ?? null, body);
+    const info = parent ? parentInfo(parent.num) : null;
+    if (parent && !info) log(`⚠️ #${i.number}: couldn't fetch epic #${parent.num}'s body — its \`Base:\` line (if any) is invisible, falling back.`);
+    const epicTitle = parent ? parent.title ?? info?.title ?? null : null;
+    const ownBase = parseBaseLine(body);
+    const epicBase = info ? parseBaseLine(info.body) : null;
+    const { base, ignoredOwnBase } = resolveBase({ ownBase, hasEpic: parent !== null, epicBase, configBase: deps.baseBranch });
+    const baseSource =
+      parent !== null && epicBase !== null ? `the \`Base:\` line in epic #${parent.num}`
+      : parent === null && ownBase !== null ? `the \`Base:\` line in issue #${i.number}`
+      : "`baseBranch` in afk.config.json";
+    const r: ResolvedIssue = { epicNum: parent?.num ?? null, epicTitle, base, baseSource, ignoredOwnBase };
+    resolvedCache.set(i.number, r);
+    return r;
+  };
+
   const out: Picked[] = [];
   for (const i of ready) {
     if (deps.inFlight?.has(i.number)) continue; // its worker is running — no demote, no re-pick
@@ -217,26 +279,38 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
     const demote = ineligibleReason({ labels: (i.labels ?? []).map((l) => l.name), subIssuesCount: m?.subIssuesCount ?? 0 });
     if (demote) { deps.onDemote(i.number, demote); continue; }
 
+    const r = resolveFor(i);
+
     // Blocking: native dependencies are authoritative; body text is the deprecated fallback.
     const blockers = resolveBlockers(m?.blockedBy ?? null, body);
     if (blockers.source === "native") {
+      // Cross-base dependency heads-up (cheap, best-effort): a blocker that's also among this
+      // round's candidates but resolves to a DIFFERENT base gates on issue-closed, not code-merged
+      // — its code will never be on this issue's base.
+      const cross = (m?.blockedBy ?? [])
+        .map((b) => byNumber.get(b.number))
+        .filter((c): c is Issue => c !== undefined)
+        .filter((c) => resolveFor(c).base !== r.base);
+      if (cross.length > 0)
+        log(`⚠️ #${i.number} (base \`${r.base}\`) is blocked by ${cross.map((c) => `#${c.number} (base \`${resolveFor(c).base}\`)`).join(", ")} on a DIFFERENT base — the dependency gates on issue-closed, not code-merged.`);
       if (blockers.blocked) continue; // still blocked — try a later round
     } else {
       if (blockers.freeText) { deps.onAmbiguous(i.number, "Ambiguous `Blocked by` (no `#N` reference). Needs a human to clarify the dependency."); continue; }
       if (blockers.refs.length > 0) log(`#${i.number}: body-text \`Blocked by\` is deprecated — use native issue dependencies (blocked-by) instead.`);
-      if (blockers.refs.some((r) => !isClosed(r))) continue; // still blocked — try a later round
+      if (blockers.refs.some((n) => !isClosed(n))) continue; // still blocked — try a later round
     }
 
-    const parent = resolveParentIssue(m?.parent ?? null, body);
-    const epicNum = parent?.num ?? null;
-    const epicTitle = parent ? parent.title ?? parentTitle(parent.num) : null;
+    if (r.ignoredOwnBase)
+      log(`⚠️ #${i.number}: its own \`Base: ${r.ignoredOwnBase}\` line is ignored — the epic's resolved base \`${r.base}\` governs grouped issues.`);
+
     const { featureKey, branch, featureTitle } = deriveFeature(
-      { epicNum, epicTitle, milestoneTitle: i.milestone?.title ?? null },
-      deps.baseBranch,
+      { epicNum: r.epicNum, epicTitle: r.epicTitle, milestoneTitle: i.milestone?.title ?? null },
+      r.base,
     );
     out.push({
       number: i.number, title: i.title, branch: `afk/issue-${i.number}`,
-      feature: branch, featureKey, featureTitle, liveVerify: liveVerifyRequested(body),
+      feature: branch, featureKey, featureTitle, base: r.base, baseSource: r.baseSource,
+      liveVerify: liveVerifyRequested(body),
     });
     if (out.length >= remaining) break;
   }

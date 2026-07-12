@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { slug } from "./sh.js";
-import { blockersOf, parentIssueNumber, deriveFeature, ineligibleReason, liveVerifyRequested, resolveBlockers, resolveParentIssue } from "./planner.js";
+import { blockersOf, parentIssueNumber, deriveFeature, ineligibleReason, liveVerifyRequested, parseBaseLine, resolveBase, resolveBlockers, resolveParentIssue } from "./planner.js";
 import { classifyVerdict, classifyError } from "./classify.js";
 import { reduce, type Event } from "./state.js";
 import type { Verdict } from "./types.js";
@@ -119,6 +119,59 @@ test("resolveParentIssue: no native parent → body parse (title left for the ca
 });
 test("resolveParentIssue: neither → null", () => {
   assert.equal(resolveParentIssue(null, "no parent here"), null);
+});
+
+// ── parseBaseLine (per-effort base declaration) ───────────────────────────────
+test("parseBaseLine: own line, case-insensitive, optional backticks, CRLF-tolerant", () => {
+  assert.equal(parseBaseLine("Intro text\nBase: helix.v2-act2\nmore text"), "helix.v2-act2");
+  assert.equal(parseBaseLine("base: `feat/x.y-z`"), "feat/x.y-z");
+  assert.equal(parseBaseLine("BASE: main"), "main");
+  assert.equal(parseBaseLine("## Details\r\nbase: helix.v2\r\n"), "helix.v2");
+});
+test("parseBaseLine: first match wins", () => {
+  assert.equal(parseBaseLine("base: first\nbase: second"), "first");
+});
+test("parseBaseLine: mid-line, mid-word, and multi-word lines don't match", () => {
+  assert.equal(parseBaseLine("please rebase: main"), null);
+  assert.equal(parseBaseLine("the Base: branch of choice"), null);
+  assert.equal(parseBaseLine("Base: two words"), null);
+  assert.equal(parseBaseLine("no declaration at all"), null);
+});
+
+// ── resolveBase (precedence: epic Base → own Base → config) ───────────────────
+test("resolveBase: grouped issue — the epic's Base wins; a differing child Base is ignored and reported", () => {
+  assert.deepEqual(
+    resolveBase({ ownBase: "helix.v2", hasEpic: true, epicBase: "helix.v2-act2", configBase: "main" }),
+    { base: "helix.v2-act2", ignoredOwnBase: "helix.v2" },
+  );
+});
+test("resolveBase: grouped issue — child Base matching the epic's resolved base raises no warning", () => {
+  assert.deepEqual(
+    resolveBase({ ownBase: "helix.v2-act2", hasEpic: true, epicBase: "helix.v2-act2", configBase: "main" }),
+    { base: "helix.v2-act2", ignoredOwnBase: null },
+  );
+});
+test("resolveBase: grouped issue — epic declares no Base → config governs; a differing child Base is still ignored", () => {
+  assert.deepEqual(
+    resolveBase({ ownBase: "helix.v2-act2", hasEpic: true, epicBase: null, configBase: "helix.v2" }),
+    { base: "helix.v2", ignoredOwnBase: "helix.v2-act2" },
+  );
+  assert.deepEqual(
+    resolveBase({ ownBase: null, hasEpic: true, epicBase: null, configBase: "helix.v2" }),
+    { base: "helix.v2", ignoredOwnBase: null },
+  );
+});
+test("resolveBase: loose issue — its own Base line governs", () => {
+  assert.deepEqual(
+    resolveBase({ ownBase: "helix.v2-act2", hasEpic: false, epicBase: null, configBase: "helix.v2" }),
+    { base: "helix.v2-act2", ignoredOwnBase: null },
+  );
+});
+test("resolveBase: loose issue with no Base line → config fallback", () => {
+  assert.deepEqual(
+    resolveBase({ ownBase: null, hasEpic: false, epicBase: null, configBase: "main" }),
+    { base: "main", ignoredOwnBase: null },
+  );
 });
 
 // ── classify ──────────────────────────────────────────────────────────────────
