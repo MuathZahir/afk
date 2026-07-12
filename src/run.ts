@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import { loadConfig } from "./core/config.js";
 import { Engine } from "./core/engine.js";
 import { pick } from "./core/planner.js";
-import { dirtyTreeMessage, isRateLimit } from "./core/sh.js";
+import { isRateLimit } from "./core/sh.js";
 import { Feature, Result } from "./core/types.js";
 
 // ── bounded-concurrency pool ──────────────────────────────────────────────────
@@ -26,8 +26,6 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
   const cfg = loadConfig();
   console.log(`AFK starting on ${cfg.nwo} — base=${cfg.baseBranch}, parallel=${cfg.maxParallel}, cap=${cfg.maxIssues}\n`);
   const engine = new Engine(cfg);
-  const dirty = engine.hostTreeChanges();
-  if (dirty.length) { console.error(dirtyTreeMessage(dirty)); process.exit(1); }
   engine.cleanStartup();
 
   const results: Result[] = [];
@@ -76,11 +74,11 @@ function writeReport(results: Result[], features: Feature[], baseBranch: string)
   const onBase = results.filter((r) => r.status === "merged" && r.feature === baseBranch).length;
   const needHuman = results.length - mergedN;
   const summaryLine = onFeature > 0 && onBase > 0
-    ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** merged directly to \`${baseBranch}\` (no feature), **${needHuman}** need a human.`
+    ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** with their own PR to \`${baseBranch}\` (no feature), **${needHuman}** need a human.`
     : onFeature > 0
     ? `**${onFeature}** issue(s) landed on feature branch(es), **${needHuman}** need a human.`
     : onBase > 0
-    ? `**${onBase}** issue(s) merged directly to \`${baseBranch}\` (no epic/milestone), **${needHuman}** need a human.`
+    ? `**${onBase}** issue(s) opened their own PR to \`${baseBranch}\` (no epic/milestone), **${needHuman}** need a human.`
     : `**0** issues merged, **${results.length}** need a human.`;
   const report = [
     `# AFK run report`, ``, summaryLine, ``,

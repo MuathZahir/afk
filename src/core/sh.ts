@@ -45,15 +45,6 @@ export const isRateLimit = (e: unknown): boolean =>
 export const slug = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "feature";
 
-/** A user-facing message explaining why AFK won't run with a dirty host working tree. */
-export const dirtyTreeMessage = (files: string[]): string =>
-  `\n✖ AFK can't run: this repo has ${files.length} uncommitted change(s).\n` +
-  `  AFK lands work by switching branches and merging in THIS working tree, which needs it clean.\n` +
-  `  Commit or stash your changes (or 'git reset --hard' if they're leftovers from a crashed run),\n` +
-  `  then run again. Changed files:\n` +
-  files.slice(0, 25).map((f) => `    ${f}`).join("\n") +
-  (files.length > 25 ? `\n    …and ${files.length - 25} more` : "");
-
 export const readJson = <T = any>(f: string): T | null => {
   try { return JSON.parse(fs.readFileSync(f, "utf8")) as T; } catch { return null; }
 };

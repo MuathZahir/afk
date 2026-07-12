@@ -1,0 +1,112 @@
+/**
+ * Landing-flow tests for the host-tree-free contract. `mergeInWorktree` runs against a REAL temp
+ * git repo (no Docker, no GitHub, no LLM) and must land/route merges while leaving the host
+ * worktree completely untouched — even mid-edit. That "host tree mutated by afk" failure mode is
+ * exactly the regression this suite plants a flag on. Run with `npm test`.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+import { looseIssue, mergeInWorktree } from "./engine.js";
+import { deriveFeature } from "./planner.js";
+
+const G = (dir: string, args: string[]) =>
+  execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+/** A real repo with one commit on `main`, checked out — the developer's host tree. */
+function makeRepo(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "afk-landing-"));
+  execFileSync("git", ["init", "-q", "-b", "main", dir], { encoding: "utf8" });
+  G(dir, ["config", "user.email", "afk@test.local"]);
+  G(dir, ["config", "user.name", "afk-test"]);
+  G(dir, ["config", "commit.gpgsign", "false"]);
+  fs.writeFileSync(path.join(dir, "a.txt"), "base\n");
+  G(dir, ["add", "."]);
+  G(dir, ["commit", "-m", "base"]);
+  return dir;
+}
+/** Create `branch` from `from`, commit one file change on it (leaves `branch` checked out). */
+function commitOn(dir: string, branch: string, from: string, file: string, content: string, msg: string): void {
+  G(dir, ["checkout", "-q", "-b", branch, from]);
+  fs.writeFileSync(path.join(dir, file), content);
+  G(dir, ["add", "."]);
+  G(dir, ["commit", "-m", msg]);
+}
+const mergeWorktrees = (dir: string) =>
+  [...G(dir, ["worktree", "list", "--porcelain"]).matchAll(/_merge-/g)].length;
+const cleanup = (dir: string) => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows file lock — temp dir, OS reaps it */ } };
+
+// ── landing route: loose vs grouped ──────────────────────────────────────────
+test("landing route: loose issue (no epic/milestone) opens its own PR; grouped issues merge to their feature", () => {
+  const loose = deriveFeature({ epicNum: null, epicTitle: null, milestoneTitle: null }, "main");
+  assert.equal(looseIssue({ feature: loose.branch, featureKey: loose.featureKey }, "main"), true);
+  const epic = deriveFeature({ epicNum: 7, epicTitle: "Roleplay History", milestoneTitle: null }, "main");
+  assert.equal(looseIssue({ feature: epic.branch, featureKey: epic.featureKey }, "main"), false);
+  const ms = deriveFeature({ epicNum: null, epicTitle: null, milestoneTitle: "Billing" }, "main");
+  assert.equal(looseIssue({ feature: ms.branch, featureKey: ms.featureKey }, "main"), false);
+});
+
+// ── mergeInWorktree: clean merge ─────────────────────────────────────────────
+test("mergeInWorktree: clean merge lands --no-ff on the feature branch and never touches the host tree", () => {
+  const dir = makeRepo();
+  try {
+    G(dir, ["branch", "feat/1-x", "main"]);
+    commitOn(dir, "afk/issue-1", "feat/1-x", "b.txt", "issue work\n", "issue 1");
+    G(dir, ["checkout", "-q", "main"]);
+    // The developer is mid-edit in the host tree — the exact situation the old checkout+merge broke.
+    fs.writeFileSync(path.join(dir, "a.txt"), "developer edit in progress\n");
+    const headBefore = G(dir, ["rev-parse", "HEAD"]);
+
+    assert.equal(mergeInWorktree("feat/1-x", "afk/issue-1", "feat: x (#1)", { repoDir: dir }), "ok");
+
+    // The merge landed: issue commit + merge commit ahead of main, with the merge message.
+    assert.equal(G(dir, ["rev-list", "--count", "main..feat/1-x"]), "2");
+    assert.match(G(dir, ["log", "-1", "--format=%s", "feat/1-x"]), /\(#1\)/);
+    // Host tree untouched: same branch, same HEAD, developer's uncommitted edit intact.
+    assert.equal(G(dir, ["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert.equal(G(dir, ["rev-parse", "HEAD"]), headBefore);
+    assert.equal(fs.readFileSync(path.join(dir, "a.txt"), "utf8"), "developer edit in progress\n");
+    // The throwaway worktree was removed.
+    assert.equal(mergeWorktrees(dir), 0);
+  } finally { cleanup(dir); }
+});
+
+// ── mergeInWorktree: conflict ────────────────────────────────────────────────
+test("mergeInWorktree: conflicting merge returns 'conflict', aborts in the throwaway, leaves everything untouched", () => {
+  const dir = makeRepo();
+  try {
+    commitOn(dir, "feat/2-y", "main", "a.txt", "feature version\n", "feature edit");
+    commitOn(dir, "afk/issue-2", "main", "a.txt", "issue version\n", "issue edit");
+    G(dir, ["checkout", "-q", "main"]);
+    const featHead = G(dir, ["rev-parse", "feat/2-y"]);
+
+    assert.equal(mergeInWorktree("feat/2-y", "afk/issue-2", "feat: y (#2)", { repoDir: dir }), "conflict");
+
+    // Feature branch unchanged, no merge left in progress anywhere, host tree clean on main.
+    assert.equal(G(dir, ["rev-parse", "feat/2-y"]), featHead);
+    assert.equal(G(dir, ["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert.equal(G(dir, ["status", "--porcelain"]), "");
+    assert.equal(mergeWorktrees(dir), 0);
+  } finally { cleanup(dir); }
+});
+
+// ── mergeInWorktree: refuses to start ────────────────────────────────────────
+test("mergeInWorktree: target branch checked out in the host tree → 'failed', target left unchanged", () => {
+  const dir = makeRepo();
+  try {
+    G(dir, ["branch", "feat/3-z", "main"]);
+    commitOn(dir, "afk/issue-3", "main", "c.txt", "x\n", "issue 3");
+    // The developer has the FEATURE branch checked out — git refuses a second worktree on it.
+    G(dir, ["checkout", "-q", "feat/3-z"]);
+    const featHead = G(dir, ["rev-parse", "feat/3-z"]);
+
+    assert.equal(mergeInWorktree("feat/3-z", "afk/issue-3", "feat: z (#3)", { repoDir: dir }), "failed");
+
+    assert.equal(G(dir, ["rev-parse", "feat/3-z"]), featHead);
+    assert.equal(G(dir, ["status", "--porcelain"]), "");
+    assert.equal(mergeWorktrees(dir), 0);
+  } finally { cleanup(dir); }
+});

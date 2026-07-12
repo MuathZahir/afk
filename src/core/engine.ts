@@ -3,9 +3,14 @@
  * (daemon). It owns the proven safety nets (serialized git writes, uncommitted-work rescue, stale
  * worktree/container reaping) and the full per-issue → per-feature lifecycle:
  *
- *   implement (Opus, bounded self-correct) → merge to feature (conflict → Resolver)
- *     → when the feature is complete: verify (Sonnet) → classify failure → Fixer loop / re-run
- *     → green ⇒ ready PR + evidence; otherwise escalate with evidence.
+ *   implement (Opus, bounded self-correct) → land: a loose issue opens its own PR to the base
+ *     branch; a grouped issue merges into its feature branch inside a THROWAWAY worktree
+ *     (conflict → Resolver) → when the feature is complete: verify (Sonnet) → classify failure →
+ *     Fixer loop / re-run → green ⇒ ready PR + evidence; otherwise escalate with evidence.
+ *
+ * The host repo's working tree is NEVER mutated: no checkout/merge/reset ever runs in it, so afk
+ * can run while the developer is actively editing. Host-side git is limited to fetch, afk-owned
+ * branch create/delete, throwaway worktrees, and read-only commands.
  *
  * Side effects are reported two ways: a human `log()` line (console / report) and a structured
  * `emit()` event (the daemon's state store + dashboard). Both are injected, so the engine itself is
@@ -27,6 +32,52 @@ import type { EventBody } from "./state.js";
 
 const WORKER_IMAGE = "afk-worker";
 const RELEASE_TAG = "afk-artifacts";
+
+/** A loose issue (no epic/milestone → routed at the base branch) lands via its OWN PR; a grouped
+ *  issue merges into its feature branch. Pure — unit-tested against `deriveFeature`'s outputs. */
+export function looseIssue(p: { feature: string; featureKey: string | null }, baseBranch: string): boolean {
+  return p.featureKey === null || p.feature === baseBranch;
+}
+
+/**
+ * Merge `branch` into `target` with `--no-ff` inside a throwaway worktree under
+ * `.sandcastle/worktrees/_merge-*` — the host repo's index/working tree are never touched.
+ * Never throws — returns the outcome so the caller routes it (conflict → Resolver, failed →
+ * escalate) instead of crashing the run.
+ *
+ * Conflicts are detected via unmerged index entries (`ls-files -u`) in the throwaway worktree —
+ * git prints "Automatic merge failed" to STDOUT, which execFileSync's error message doesn't carry,
+ * so text classification alone can't see it. A merge that refuses to *start* leaves no MERGE_HEAD —
+ * `--abort` would throw, so it stays guarded (crash-loop guard), and the abort runs inside the
+ * throwaway worktree before it's removed.
+ */
+export function mergeInWorktree(
+  target: string,
+  branch: string,
+  message: string,
+  opts: { repoDir?: string; log?: (m: string) => void } = {},
+): "ok" | "conflict" | "failed" {
+  const repo = opts.repoDir ?? ".";
+  const G = (args: string[]) => git(["-C", repo, ...args]);
+  const wt = path.resolve(repo, ".sandcastle", "worktrees", `_merge-${slug(branch)}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
+  try {
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    G(["worktree", "add", wt, target]);
+  } catch (e) {
+    opts.log?.(`couldn't create a merge worktree on ${target}: ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+    return "failed";
+  }
+  try {
+    git(["-C", wt, "merge", "--no-ff", branch, "-m", message]);
+    return "ok";
+  } catch (e) {
+    const conflicted = (() => { try { return git(["-C", wt, "ls-files", "-u"]).trim() !== ""; } catch { return false; } })();
+    try { git(["-C", wt, "merge", "--abort"]); } catch { /* nothing to abort — the merge never started */ }
+    return conflicted || classifyError(String((e as Error)?.message ?? e)).kind === "conflict" ? "conflict" : "failed";
+  } finally {
+    try { G(["worktree", "remove", "--force", wt]); } catch { /* leftovers reaped by cleanStartup */ }
+  }
+}
 
 export type EngineHooks = {
   log?: (msg: string) => void;
@@ -94,15 +145,16 @@ export class Engine {
     try { return Number(git(["rev-list", "--count", `${base}..${branch}`]).trim()) > 0; } catch { return false; }
   }
 
-  /**
-   * Tracked, uncommitted changes in the host working tree. AFK lands work by checking out the feature
-   * branch and merging *in this working tree*, so any such changes will make the merge refuse to
-   * start. Untracked files are ignored (they don't block checkout/merge). The driver refuses to run
-   * when this is non-empty, with a clear message — far better than failing mid-merge.
-   */
-  hostTreeChanges(): string[] {
-    try { return git(["status", "--porcelain", "--untracked-files=no"]).split("\n").map((s) => s.trim()).filter(Boolean); }
-    catch { return []; }
+  /** Freshen `origin/<base>` — a plain fetch, so the host tree is untouched. Offline / no remote is
+   *  fine: new branches then fork from the local base instead. */
+  private fetchBase(): void {
+    try { git(["fetch", "origin", this.cfg.baseBranch]); } catch { /* offline / no remote — fall back to local base */ }
+  }
+  /** The ref new feature/issue branches fork from: `origin/<base>` when it exists (fresh after
+   *  `fetchBase`), falling back to the local base (e.g. a fresh repo with no remote ref yet). */
+  private baseRef(): string {
+    try { git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${this.cfg.baseBranch}`]); return `origin/${this.cfg.baseBranch}`; }
+    catch { return this.cfg.baseBranch; }
   }
 
   private ensureFeatureBranch(fb: string): void {
@@ -110,8 +162,8 @@ export class Engine {
     const localExists = git(["branch", "--list", fb]).trim() !== "";
     if (!localExists) {
       const onOrigin = (() => { try { return git(["ls-remote", "--heads", "origin", fb]).trim() !== ""; } catch { return false; } })();
-      if (onOrigin) { try { git(["fetch", "origin", `${fb}:${fb}`]); } catch { git(["branch", fb, this.cfg.baseBranch]); } }
-      else git(["branch", fb, this.cfg.baseBranch]);
+      if (onOrigin) { try { git(["fetch", "origin", `${fb}:${fb}`]); } catch { git(["branch", fb, this.baseRef()]); } }
+      else git(["branch", fb, this.baseRef()]);
     }
     this.featureBranchReady.add(fb);
   }
@@ -139,10 +191,11 @@ export class Engine {
     }
   }
 
-  /** Wipe dirty worktrees + reap orphaned containers from a killed prior run. Call once at startup. */
+  /** Wipe dirty worktrees (incl. leftover `_merge-*` throwaways) + reap orphaned containers from a
+   *  killed prior run. Call once at startup. */
   cleanStartup(): void {
     try {
-      for (const m of git(["worktree", "list", "--porcelain"]).matchAll(/^worktree (.*afk-issue-\d+.*)$/gim)) {
+      for (const m of git(["worktree", "list", "--porcelain"]).matchAll(/^worktree (.*(?:afk-issue-\d+|_merge-).*)$/gim)) {
         try { git(["worktree", "remove", "--force", m[1].trim()]); } catch { /* keep going */ }
       }
       git(["worktree", "prune"]);
@@ -222,7 +275,14 @@ export class Engine {
   // ── per-issue pipeline ────────────────────────────────────────────────────────
   async processIssue(p: Picked): Promise<Result> {
     const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
-    await this.withGitLock(() => this.ensureFeatureBranch(p.feature));
+    const loose = looseIssue(p, this.cfg.baseBranch);
+    // Fresh fork point, no host checkout: fetch origin/<base>, then fork the issue branch from the
+    // feature branch (grouped) or straight from origin/<base> (loose).
+    const forkRef = await this.withGitLock(() => {
+      this.fetchBase();
+      this.ensureFeatureBranch(p.feature);
+      return loose ? this.baseRef() : p.feature;
+    });
     this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "implementing" });
     // Surface the feature node immediately (with its real title) so an in-flight epic child shows up
     // in the tree right away, not only once something merges.
@@ -244,7 +304,7 @@ export class Engine {
           mounts: cacheMounts(this.cfg),
         }),
         branch: p.branch,
-        baseBranch: p.feature,
+        baseBranch: forkRef,
         hooks: { sandbox: { onSandboxReady: [{ command: this.cfg.setup, timeoutMs: this.cfg.absoluteTimeoutMs }] } },
       });
       this.activity(agentId, "✅ setup done — launching the agent");
@@ -292,14 +352,14 @@ export class Engine {
           this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "queued", note: "daemon stopped mid-run — will resume on next start" });
           return done({ num: p.number, title: p.title, status: "stopped", feature: p.feature });
         }
-        if (sandbox && !this.branchAhead(p.branch, p.feature)) this.rescueUncommitted(sandbox.worktreePath, p);
+        if (sandbox && !this.branchAhead(p.branch, forkRef)) this.rescueUncommitted(sandbox.worktreePath, p);
         const userStopped = this.stoppedIds.has(agentId);
         const reason = userStopped
           ? "Stopped by you from the dashboard — partial work preserved."
           : ac.signal.aborted
           ? `Worker hit the ${this.cfg.absoluteTimeoutMin}m absolute cap.`
           : `Worker stalled (idle > ${this.cfg.idleTimeoutSec / 60}m) or errored before finishing.`;
-        const wb = this.branchAhead(p.branch, p.feature) ? p.branch : undefined;
+        const wb = this.branchAhead(p.branch, forkRef) ? p.branch : undefined;
         preserve = this.escalate(p.number, p.title, reason, userStopped ? "" : `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``, wb);
         const status: "stopped" | "timeout" | "error" = userStopped ? "stopped" : ac.signal.aborted ? "timeout" : "error";
         this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: status });
@@ -339,7 +399,23 @@ export class Engine {
         return done({ num: p.number, title: p.title, status: "rescued", feature: p.feature });
       }
 
-      // ── merge issue branch → feature branch (serialized); conflict → Resolver ──
+      // ── land: loose issue → its own PR to the base branch (no local merge, ever) ──
+      if (loose) {
+        const url = this.openIssuePR(p, summary);
+        if (!url) {
+          preserve = this.escalate(p.number, p.title, `Implemented \`${p.branch}\` but couldn't push it / open its PR against \`${this.cfg.baseBranch}\`.`, "", workBranch);
+          this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "error" });
+          return done({ num: p.number, title: p.title, status: "error", feature: p.feature });
+        }
+        landed = true;
+        // The PR body's `Closes #N` closes the issue when it merges — don't close it here.
+        gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — PR opened: ${url}**\n\n${summary}`]);
+        try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
+        return done({ num: p.number, title: p.title, status: "merged", feature: p.feature });
+      }
+
+      // ── grouped: merge issue branch → feature branch in a throwaway worktree; conflict → Resolver ──
       const merge = await this.tryMerge(p);
       let failReason: string | null = null;
       if (merge === "conflict") {
@@ -347,7 +423,7 @@ export class Engine {
         if (!(await this.tryResolve(p, issueJson)))
           failReason = `Merge conflict with \`${p.feature}\` the Resolver couldn't reconcile. Needs a human.`;
       } else if (merge === "failed") {
-        failReason = `Couldn't merge \`${p.branch}\` into \`${p.feature}\`. The host repo's working tree likely has uncommitted changes — AFK needs a clean tree to land work. Commit or stash them, then re-queue.`;
+        failReason = `Couldn't merge \`${p.branch}\` into \`${p.feature}\` — the throwaway merge worktree couldn't be created (is \`${p.feature}\` checked out somewhere?) or the merge failed before starting. Partial work is preserved; re-queue after checking the branch.`;
       }
       if (failReason) {
         const st = merge === "conflict" ? "conflict" : "error";
@@ -362,8 +438,7 @@ export class Engine {
         const f = this.features.get(p.feature) ?? { key: p.featureKey, title: p.featureTitle ?? p.featureKey, branch: p.feature, merged: [] };
         f.merged.push(p.number); this.features.set(p.feature, f);
       }
-      const where = p.feature === this.cfg.baseBranch ? `\`${this.cfg.baseBranch}\`` : `\`${p.feature}\` (feature branch)`;
-      gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — landed on ${where}.**\n\n${summary}`]);
+      gh(["issue", "comment", String(p.number), "--body", `> *Posted by AFK.*\n\n✅ **Done — landed on \`${p.feature}\` (feature branch).**\n\n${summary}`]);
       try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
       gh(["issue", "close", String(p.number)]);
       this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "merged" });
@@ -378,32 +453,36 @@ export class Engine {
     }
   }
 
-  /** Merge the issue branch into its feature branch. Never throws — returns the outcome so the caller
-   *  routes it (conflict → Resolver, failed → escalate) instead of crashing the run. */
-  private tryMerge(p: Picked): Promise<"ok" | "conflict" | "failed"> {
-    return this.withGitLock(() => {
-      try { git(["checkout", p.feature]); }
-      catch (e) {
-        this.log(`  ⚠️  #${p.number}: couldn't switch to ${p.feature} (host working tree not clean?): ${String((e as Error)?.message ?? e).split("\n")[0]}`);
-        return "failed";
-      }
-      try {
-        git(["merge", "--no-ff", p.branch, "-m", `feat: ${p.title} (#${p.number})`]);
-        return "ok";
-      } catch (e) {
-        const msg = String((e as Error)?.message ?? e);
-        // A merge that refused to *start* (dirty tree) leaves no MERGE_HEAD — `--abort` would throw,
-        // so guard it. Only a real conflict leaves a merge in progress worth aborting.
-        try { git(["merge", "--abort"]); } catch { /* nothing to abort */ }
-        return classifyError(msg).kind === "conflict" ? "conflict" : "failed";
-      }
-    });
+  /** Push a loose issue's branch and open (or refresh) its own PR against the base branch. The PR
+   *  body carries `Closes #N`, so the issue closes when the PR merges. Returns the PR url or null. */
+  private openIssuePR(p: Picked, summary: string): string | null {
+    try { git(["push", "-u", "origin", p.branch]); }
+    catch (e) {
+      this.log(`  ⚠️  #${p.number}: couldn't push ${p.branch}: ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+      return null;
+    }
+    const body = `> *Opened by AFK.*\n\nCloses #${p.number}\n\n${summary}`;
+    try {
+      return gh(["pr", "create", "--base", this.cfg.baseBranch, "--head", p.branch, "--title", `feat: ${p.title} (#${p.number})`, "--body", body]).trim();
+    } catch {
+      // A PR for this branch may already exist (re-run) — refresh its body and return its url.
+      try { gh(["pr", "edit", p.branch, "--body", body]); } catch { /* ignore */ }
+      try { return gh(["pr", "view", p.branch, "--json", "url", "-q", ".url"]).trim(); } catch { return null; }
+    }
   }
 
-  /** Run the Resolver on the feature branch. Returns true if the merge now completed cleanly. */
+  /** Merge the issue branch into its feature branch inside a throwaway worktree (the host tree is
+   *  never touched). Never throws — returns the outcome so the caller routes it (conflict →
+   *  Resolver, failed → escalate) instead of crashing the run. */
+  private tryMerge(p: Picked): Promise<"ok" | "conflict" | "failed"> {
+    return this.withGitLock(() =>
+      mergeInWorktree(p.feature, p.branch, `feat: ${p.title} (#${p.number})`, { log: (m) => this.log(`  ⚠️  #${p.number}: ${m}`) }),
+    );
+  }
+
+  /** Run the Resolver on the feature branch (in its own sandboxed worktree — no host checkout).
+   *  Returns true if the merge now completed cleanly. */
   private async tryResolve(p: Picked, issueJson: string): Promise<boolean> {
-    // Host must be off the feature branch while the Resolver's worktree holds it.
-    await this.withGitLock(() => { try { git(["checkout", this.cfg.baseBranch]); } catch { /* ignore */ } });
     const id = `resolve-${p.number}`;
     this.emit({ type: "agent", id, role: "resolve", target: `#${p.number}`, phase: "start" });
     try {
@@ -411,7 +490,7 @@ export class Engine {
         runResolver(this.cfg, p.feature, p.branch, issueJson, { signal, onActivity: (l) => this.activity(id, l) }),
       );
       // Resolved iff the resolver committed the merge and didn't bail.
-      return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.cfg.baseBranch);
+      return out.commits > 0 && !out.blocked && this.branchAhead(p.feature, this.baseRef());
     } catch (e) {
       this.log(`  ⚠️  Resolver failed for #${p.number}: ${(e as Error)?.message ?? e}`);
       return false;
@@ -519,7 +598,7 @@ export class Engine {
   /** Open (or refresh) the single PR for a feature. Ready iff verified green or honestly unverified. */
   async openFeaturePR(feature: Feature, v: { verdict: Verdict | null; unverifiedReason: string | null; evidenceMd: string }): Promise<string | null> {
     if (feature.branch === this.cfg.baseBranch || feature.merged.length === 0) return null;
-    await this.withGitLock(() => { try { git(["checkout", this.cfg.baseBranch]); } catch { /* ignore */ } });
+    // Push by refspec — no host checkout is ever needed to publish the feature branch.
     try { git(["push", "origin", feature.branch]); } catch { /* may be up to date */ }
 
     const incomplete = this.featureChildren(feature).openReady.length > 0;
