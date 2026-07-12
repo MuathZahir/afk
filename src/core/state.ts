@@ -24,8 +24,8 @@ export type EventBody =
   | { type: "verdict"; feature: string; ok: boolean; summary: string; passed: number; total: number };
 /** A persisted event: a body plus the timestamp the store stamps on. */
 export type Event = { ts: string } & EventBody;
-export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify" | "review";
-export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question" | "stopped";
+export type AgentRole = "implement" | "verify" | "fix" | "resolve" | "classify" | "review" | "research";
+export type IssueState = "queued" | "implementing" | "merged" | "blocked" | "escalated" | "conflict" | "timeout" | "error" | "rescued" | "question" | "stopped" | "researched";
 
 /** A live agent-stream line (assistant text or tool call). Transient — streamed to the dashboard but
  *  NOT persisted to the durable event log (it would flood it); kept only in a bounded in-memory buffer. */

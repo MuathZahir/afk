@@ -18,7 +18,7 @@ export type Resolved = {
   absoluteTimeoutMs: number;
   absoluteTimeoutMin: number;
   maxFixAttempts: number;
-  models: { implement: string; verify: string; fix: string; classify: string; review: string };
+  models: { implement: string; verify: string; fix: string; classify: string; review: string; research: string };
   labelReady: string;
   labelHuman: string;
   verify: Required<Pick<VerifyConfig, "enabled" | "backendOnly">> & VerifyConfig;
@@ -47,12 +47,14 @@ export function loadConfig(cwd = process.cwd()): Resolved {
   const nwo = gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).trim();
 
   const model = raw.model ?? "opus";
+  const implement = raw.models?.implement ?? model;
   const models = {
-    implement: raw.models?.implement ?? model,
+    implement,
     verify: raw.models?.verify ?? "sonnet",
     fix: raw.models?.fix ?? model,
     classify: raw.models?.classify ?? "haiku",
     review: raw.models?.review ?? "claude-sonnet-4-6",
+    research: raw.models?.research ?? implement,
   };
   const absoluteTimeoutMs = (raw.absoluteTimeoutMin ?? raw.issueTimeoutMin ?? 90) * 60_000;
   const cacheRoot = path.join(os.homedir(), ".afk", "cache");

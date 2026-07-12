@@ -58,6 +58,24 @@ export function routeReview(err: unknown, review: unknown):
   return { action: "proceed" };
 }
 
+/** Route a finished research run's signal files. Pure — unit-tested. Priority mirrors the
+ *  implement lane: a clarifying question pauses the issue; a bail escalates with the agent's
+ *  reason; otherwise non-empty findings publish (comment + close) and missing/empty findings
+ *  escalate — never a silent "done" with nothing to show. */
+export function routeResearch(
+  question: { question?: string; detail?: string } | null,
+  blocked: { reason?: string; detail?: string } | null,
+  findings: string | null,
+):
+  | { action: "question"; q: { question?: string; detail?: string } }
+  | { action: "escalate"; reason: string; detail: string }
+  | { action: "publish"; findings: string } {
+  if (question?.question) return { action: "question", q: question };
+  if (blocked) return { action: "escalate", reason: `The researcher bailed: ${blocked.reason ?? "blocked"}.`, detail: blocked.detail ? `\n${blocked.detail}` : "" };
+  if (findings !== null && findings.trim() !== "") return { action: "publish", findings };
+  return { action: "escalate", reason: "The researcher produced no findings file (`.afk/research.md` missing or empty).", detail: "" };
+}
+
 /**
  * Merge `branch` into `target` with `--no-ff` inside a throwaway worktree under
  * `.sandcastle/worktrees/_merge-*` — the host repo's index/working tree are never touched.
@@ -326,6 +344,7 @@ export class Engine {
 
   // ── per-issue pipeline ────────────────────────────────────────────────────────
   async processIssue(p: Picked): Promise<Result> {
+    if (p.mode === "research") return this.researchIssue(p);
     const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
     const loose = looseIssue(p, p.base);
     // Fresh fork point, no host checkout: fetch origin/<base> (the ISSUE's base), then fork the
@@ -525,6 +544,130 @@ export class Engine {
       const wt = sandbox?.worktreePath;
       if (sandbox) await sandbox.close().catch(() => {});
       if (landed || !preserve) await this.withGitLock(() => {
+        if (wt) { try { git(["worktree", "remove", "--force", wt]); } catch { /* already gone */ } }
+        try { git(["branch", "-D", p.branch]); } catch { /* gone / checked out */ }
+      });
+    }
+  }
+
+  // ── research lane (`Picked.mode === "research"`) ─────────────────────────────
+  /**
+   * A `wayfinder:research` ticket: same sandbox creation on the issue branch (harmless — research
+   * makes no commits), same setup hook and abort/rate-limit discipline as implement, but the
+   * deliverable is `.afk/research.md` — posted as the resolution comment (clearly AFK-authored,
+   * unreviewed) and the issue is CLOSED (auto-close is the chosen policy — routing.md,
+   * "`wayfinder:research` tickets"). NO review pass, NO rescue, NO merge, NO push, NO PR: any
+   * commits the agent makes despite instructions are simply discarded with the branch.
+   */
+  private async researchIssue(p: Picked): Promise<Result> {
+    const issueJson = gh(["issue", "view", String(p.number), "--json", "title,body,comments"]);
+    const result = (status: Result["status"]): Result => ({ num: p.number, title: p.title, status, feature: p.feature, base: p.base });
+    // Same fresh fork point as implement — no feature branch though: research never lands code.
+    const forkRef = await this.withGitLock((): string | null => {
+      this.fetchBase(p.base);
+      return this.baseRef(p.base);
+    });
+    if (forkRef === null) {
+      this.escalate(p.number, p.title,
+        `The declared base branch \`${p.base}\` doesn't exist on origin (declared via ${p.baseSource}).`,
+        "\nFix the branch name (or push the branch), then re-queue the issue.");
+      this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
+      return result("error");
+    }
+    this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "implementing", note: "research" });
+    const agentId = `research-${p.number}`;
+    this.emit({ type: "agent", id: agentId, role: "research", target: `#${p.number}`, phase: "start" });
+    const done = (r: Result): Result => { this.emit({ type: "agent", id: agentId, role: "research", target: `#${p.number}`, phase: "end" }); return r; };
+
+    let sandbox: sandcastle.Sandbox | undefined;
+    this.activity(agentId, `🛠 starting sandbox + running setup (\`${this.cfg.setup}\`)${cacheActive(this.cfg) ? "" : " — dep cache off, so this install is slow"}…`);
+    try {
+      sandbox = await sandcastle.createSandbox({
+        sandbox: dockerSandbox({ imageName: WORKER_IMAGE, mounts: cacheMounts(this.cfg) }),
+        branch: p.branch,
+        baseBranch: forkRef,
+        hooks: { sandbox: { onSandboxReady: [{ command: this.cfg.setup, timeoutMs: this.cfg.absoluteTimeoutMs }] } },
+      });
+      if (!fs.existsSync(path.join(sandbox.worktreePath, ".sandcastle", "research-prompt.md"))) {
+        this.demote(p.number, p.title,
+          `🔍 Routed to a human: this is a \`wayfinder:research\` ticket, but research mode isn't scaffolded in this repo — no \`.sandcastle/research-prompt.md\` on the branch. Re-run \`afk init\` to scaffold it, then re-queue the issue.`);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "escalated" });
+        return done(result("blocked"));
+      }
+      this.activity(agentId, "✅ setup done — launching the researcher");
+
+      const afk = path.join(sandbox.worktreePath, ".afk");
+      for (const f of ["blocked.json", "question.json", "research.md"]) { try { fs.rmSync(path.join(afk, f), { force: true }); } catch { /* none yet */ } }
+      try {
+        await this.withController(agentId, this.cfg.absoluteTimeoutMs, (signal) =>
+          sandbox!.run({
+            name: `research-#${p.number}`,
+            agent: sandcastle.claudeCode(this.cfg.models.research, { env: { CLAUDE_CODE_OAUTH_TOKEN: this.cfg.oauth } }),
+            promptFile: ".sandcastle/research-prompt.md",
+            completionSignal: "<promise>COMPLETE</promise>",
+            maxIterations: 1,
+            promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, ISSUE_JSON: issueJson },
+            idleTimeoutSeconds: this.cfg.idleTimeoutSec,
+            signal,
+            logging: streamLogging(path.join(".afk", "logs", `${agentId}.log`), (line) => this.activity(agentId, line)),
+          }),
+        );
+      } catch (e) {
+        if (isRateLimit(e)) throw e;
+        if (this.shuttingDown) {
+          this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "queued", note: "daemon stopped mid-run — will resume on next start" });
+          return done(result("stopped"));
+        }
+        const userStopped = this.stoppedIds.has(agentId);
+        const reason = userStopped
+          ? "Stopped by you from the dashboard."
+          : `Researcher hit the ${this.cfg.absoluteTimeoutMin}m cap, stalled (idle > ${this.cfg.idleTimeoutSec / 60}m), or errored before finishing.`;
+        this.escalate(p.number, p.title, reason, userStopped ? "" : `\n\`\`\`\n${String((e as Error)?.message ?? e).slice(0, 800)}\n\`\`\``);
+        const status: "stopped" | "error" = userStopped ? "stopped" : "error";
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: status });
+        return done(result(status));
+      }
+
+      const route = routeResearch(
+        readJson(path.join(afk, "question.json")) as { question?: string; detail?: string } | null,
+        readJson(path.join(afk, "blocked.json")) as { reason?: string; detail?: string } | null,
+        readText(path.join(afk, "research.md")),
+      );
+      if (route.action === "question") {
+        this.ask(p, route.q); // no branch — research work is never preserved
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "question" });
+        return done(result("question"));
+      }
+      if (route.action === "escalate") {
+        this.escalate(p.number, p.title, route.reason, route.detail);
+        this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "blocked" });
+        return done(result("blocked"));
+      }
+
+      // (a) the findings ARE the resolution comment — clearly AFK-authored and unreviewed.
+      gh(["issue", "comment", String(p.number), "--body",
+        `> *Posted by AFK.*\n\n## 🔍 Research findings — AFK-authored, unreviewed\n\n${route.findings}`]);
+      // (b) auto-close is the chosen policy: drop the ready label and close the ticket.
+      try { gh(["issue", "edit", String(p.number), "--remove-label", this.cfg.labelReady]); } catch { /* label may not exist */ }
+      gh(["issue", "close", String(p.number)]);
+      // (c) one-line pointer COMMENT on the parent (the map) — NEVER an edit to its body; the next
+      // /wayfinder session folds pointers into `## Decisions so far`.
+      if (p.featureKey?.startsWith("epic-")) {
+        const parent = p.featureKey.replace("epic-", "");
+        try {
+          gh(["issue", "comment", parent, "--body",
+            `> *Posted by AFK.*\n\n🔍 Research resolved: **${p.title}** — see #${p.number}. Fold into Decisions-so-far next session.`]);
+        } catch (e) { this.log(`  ⚠️  #${p.number}: couldn't post the pointer comment on parent #${parent}: ${String((e as Error)?.message ?? e).split("\n")[0]}`); }
+      }
+      this.log(`  🔍 #${p.number}: research findings posted — issue closed.`);
+      this.emit({ type: "issue-state", issue: p.number, title: p.title, feature: p.featureKey, state: "researched" });
+      return done(result("researched"));
+    } finally {
+      // Always discard the branch + worktree: research never preserves work (no commits by contract;
+      // any the agent made despite instructions die here with the branch).
+      const wt = sandbox?.worktreePath;
+      if (sandbox) await sandbox.close().catch(() => {});
+      await this.withGitLock(() => {
         if (wt) { try { git(["worktree", "remove", "--force", wt]); } catch { /* already gone */ } }
         try { git(["branch", "-D", p.branch]); } catch { /* gone / checked out */ }
       });

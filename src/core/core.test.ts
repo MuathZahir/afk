@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { slug } from "./sh.js";
-import { blockersOf, parentIssueNumber, deriveFeature, ineligibleReason, liveVerifyRequested, parseBaseLine, resolveBase, resolveBlockers, resolveParentIssue } from "./planner.js";
+import { blockersOf, parentIssueNumber, deriveFeature, ineligibleReason, issueMode, liveVerifyRequested, parseBaseLine, requiresLiveVerify, resolveBase, resolveBlockers, resolveParentIssue } from "./planner.js";
 import { classifyVerdict, classifyError } from "./classify.js";
 import { reduce, type Event } from "./state.js";
 import type { Verdict } from "./types.js";
@@ -72,12 +72,17 @@ test("ineligibleReason: native sub-issues make it a parent/epic — demoted", ()
   assert.match(r ?? "", /parent\/epic with sub-issues/);
   assert.match(r ?? "", /only slices are AFK-eligible/);
 });
-test("ineligibleReason: grilling and prototype are HITL — demoted, reason names the label", () => {
+test("ineligibleReason: grilling is HITL — demoted, reason names the label", () => {
   assert.match(ineligibleReason({ labels: ["wayfinder:grilling"], subIssuesCount: 0 }) ?? "", /wayfinder:grilling/);
-  assert.match(ineligibleReason({ labels: ["wayfinder:prototype"], subIssuesCount: 0 }) ?? "", /wayfinder:prototype/);
+});
+test("ineligibleReason: prototype is NO LONGER demoted — building is eligible once a human applied ready", () => {
+  assert.equal(ineligibleReason({ labels: ["ready-for-agent", "wayfinder:prototype"], subIssuesCount: 0 }), null);
 });
 test("ineligibleReason: a plain slice is eligible", () => {
   assert.equal(ineligibleReason({ labels: ["ready-for-agent", "wayfinder:task"], subIssuesCount: 0 }), null);
+});
+test("ineligibleReason: a research slice is eligible (runs in research mode, not demoted)", () => {
+  assert.equal(ineligibleReason({ labels: ["ready-for-agent", "wayfinder:research"], subIssuesCount: 0 }), null);
 });
 
 // ── liveVerifyRequested ───────────────────────────────────────────────────────
@@ -90,6 +95,27 @@ test("liveVerifyRequested: does not match without the paren or in identifiers", 
   assert.equal(liveVerifyRequested("verify live behavior manually"), false);
   assert.equal(liveVerifyRequested("call `liveVerify(spec)` in the test"), false);
   assert.equal(liveVerifyRequested(""), false);
+});
+
+// ── requiresLiveVerify (body request OR prototype label — routing.md safety net) ──
+test("requiresLiveVerify: the wayfinder:prototype label ALONE forces the live-verify hold", () => {
+  assert.equal(requiresLiveVerify("no verify line anywhere in the body", ["ready-for-agent", "wayfinder:prototype"]), true);
+});
+test("requiresLiveVerify: an explicit body request still works without the label", () => {
+  assert.equal(requiresLiveVerify("Verify (live): open the dashboard.", ["ready-for-agent"]), true);
+});
+test("requiresLiveVerify: neither body request nor label → no hold", () => {
+  assert.equal(requiresLiveVerify("plain acceptance criteria", ["ready-for-agent", "wayfinder:task"]), false);
+});
+
+// ── issueMode (research detection) ───────────────────────────────────────────
+test("issueMode: wayfinder:research label → research mode", () => {
+  assert.equal(issueMode(["ready-for-agent", "wayfinder:research"]), "research");
+});
+test("issueMode: anything else → implement (the default)", () => {
+  assert.equal(issueMode(["ready-for-agent", "wayfinder:task"]), "implement");
+  assert.equal(issueMode(["ready-for-agent", "wayfinder:prototype"]), "implement");
+  assert.equal(issueMode([]), "implement");
 });
 
 // ── resolveBlockers: native precedence over body text ─────────────────────────

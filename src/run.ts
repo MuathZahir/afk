@@ -70,22 +70,24 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
 })();
 
 function writeReport(results: Result[], features: Feature[]): void {
-  const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥", question: "❓", stopped: "⏹️" };
+  const icon: Record<string, string> = { merged: "✅", rescued: "♻️", blocked: "🛟", timeout: "⏱️", conflict: "⚠️", "no-commits": "∅", error: "💥", question: "❓", stopped: "⏹️", researched: "🔍" };
   const lines = results.map((r) => `${icon[r.status] ?? "•"} #${r.num} ${r.title}  — ${r.status} → \`${r.feature}\``);
   const mergedN = results.filter((r) => r.status === "merged").length;
+  const researchedN = results.filter((r) => r.status === "researched").length;
   // Per-effort bases: each result carries ITS base, so a loose issue on a non-config base counts right.
   const onFeature = results.filter((r) => r.status === "merged" && r.feature !== r.base).length;
   const onBase = results.filter((r) => r.status === "merged" && r.feature === r.base).length;
-  const needHuman = results.length - mergedN;
+  const needHuman = results.length - mergedN - researchedN;
   const summaryLine = onFeature > 0 && onBase > 0
     ? `**${onFeature}** issue(s) on feature branch(es), **${onBase}** with their own PR to their base branch (no feature), **${needHuman}** need a human.`
     : onFeature > 0
     ? `**${onFeature}** issue(s) landed on feature branch(es), **${needHuman}** need a human.`
     : onBase > 0
     ? `**${onBase}** issue(s) opened their own PR to their base branch (no epic/milestone), **${needHuman}** need a human.`
-    : `**0** issues merged, **${results.length}** need a human.`;
+    : `**0** issues merged, **${needHuman}** need a human.`;
+  const researchLine = researchedN > 0 ? ` **${researchedN}** research ticket(s) resolved (findings posted, issue closed).` : "";
   const report = [
-    `# AFK run report`, ``, summaryLine, ``,
+    `# AFK run report`, ``, summaryLine + researchLine, ``,
     `## Issues`, ``, ...lines, ``,
     `> Each feature is verified end-to-end before its PR goes ready. Check out a feature branch to`,
     `> test, then merge its PR. Sweep the rest with \`/triage\`.`,

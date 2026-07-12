@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { looseIssue, mergeInWorktree, routeReview, unionChildren } from "./engine.js";
+import { looseIssue, mergeInWorktree, routeResearch, routeReview, unionChildren } from "./engine.js";
 import { deriveFeature } from "./planner.js";
 
 const G = (dir: string, args: string[]) =>
@@ -138,6 +138,34 @@ test("routeReview: clean run — no review.json, or one without a real severe re
   assert.deepEqual(routeReview(null, { severe: "" }), { action: "proceed" });
   assert.deepEqual(routeReview(null, { severe: "   " }), { action: "proceed" });
   assert.deepEqual(routeReview(null, { severe: 42 }), { action: "proceed" });
+});
+
+// ── routeResearch: research outcome routing ──────────────────────────────────
+// Planted regression: a research run that produced NOTHING must escalate, never silently close the
+// issue as "resolved" — and non-empty findings must publish (comment + close), never escalate.
+test("routeResearch: non-empty findings → publish (comment + close path)", () => {
+  assert.deepEqual(routeResearch(null, null, "Answer: yes.\n\nEvidence: src/x.ts:12"),
+    { action: "publish", findings: "Answer: yes.\n\nEvidence: src/x.ts:12" });
+});
+test("routeResearch: missing or empty findings → escalate, reason names the missing file", () => {
+  for (const findings of [null, "", "   \n\t"]) {
+    const r = routeResearch(null, null, findings);
+    assert.equal(r.action, "escalate");
+    assert.match((r as { reason: string }).reason, /no findings file/);
+    assert.match((r as { reason: string }).reason, /research\.md/);
+  }
+});
+test("routeResearch: a bail (blocked.json) → escalate with the researcher's reason + detail", () => {
+  assert.deepEqual(routeResearch(null, { reason: "needs live Stripe docs", detail: "checked docs/ first" }, null),
+    { action: "escalate", reason: "The researcher bailed: needs live Stripe docs.", detail: "\nchecked docs/ first" });
+  assert.deepEqual(routeResearch(null, {}, "findings that must not publish"),
+    { action: "escalate", reason: "The researcher bailed: blocked.", detail: "" });
+});
+test("routeResearch: a clarifying question takes priority over everything else", () => {
+  assert.deepEqual(routeResearch({ question: "which epoch?" }, { reason: "x" }, "findings"),
+    { action: "question", q: { question: "which epoch?" } });
+  // an empty question object doesn't count as a question
+  assert.equal(routeResearch({}, null, "findings").action, "publish");
 });
 
 // ── unionChildren: featureChildren must see NATIVE sub-issue children too ────

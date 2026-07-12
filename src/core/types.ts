@@ -39,7 +39,7 @@ export type Config = {
   issueTimeoutMin?: number; // legacy → absolute cap
   maxFixAttempts?: number;
   model?: string;
-  models?: { implement?: string; verify?: string; fix?: string; classify?: string; review?: string };
+  models?: { implement?: string; verify?: string; fix?: string; classify?: string; review?: string; research?: string };
   setup?: string;
   /** Bind-mount the npm + node_modules caches into workers so installs are reused across runs.
    *  Default true; set false to force a clean install every time. */
@@ -69,8 +69,12 @@ export type Picked = {
   base: string;
   /** Where `base` was declared, for human-facing messages (e.g. "the `Base:` line in epic #377"). */
   baseSource: string;
-  /** Issue body asked for a live verification pass (`Verify (live)…`) → its PR opens as a draft. */
+  /** Live verification pass owed (`Verify (live)…` in the body OR the `wayfinder:prototype`
+   *  label) → its PR opens as a draft with the `verify:live-pending` hold. */
   liveVerify: boolean;
+  /** `wayfinder:research` tickets run the research lane (findings comment + close, no commits/PR);
+   *  everything else is a normal implement. */
+  mode: "implement" | "research";
 };
 
 /** `liveVerify` = landed children that requested a live pass → the feature PR stays draft.
@@ -79,7 +83,7 @@ export type Feature = { key: string; title: string; branch: string; base: string
 
 // ── per-issue/feature outcomes ────────────────────────────────────────────────
 export type IssueStatus =
-  | "merged" | "rescued" | "blocked" | "timeout" | "conflict" | "no-commits" | "error" | "question" | "stopped";
+  | "merged" | "rescued" | "blocked" | "timeout" | "conflict" | "no-commits" | "error" | "question" | "stopped" | "researched";
 export type Result = { num: number; title: string; status: IssueStatus; feature: string; base: string; media?: number };
 
 // ── verification (Phase 1) ─────────────────────────────────────────────────────

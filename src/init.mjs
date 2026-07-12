@@ -82,7 +82,7 @@ if (!dockerUp) {
 step("Harness");
 const dstSc = path.join(TARGET, ".sandcastle");
 fs.mkdirSync(path.join(dstSc, "lib"), { recursive: true });
-const PROMPTS = ["implement-prompt.md", "review-prompt.md", "verify-prompt.md", "fix-prompt.md", "resolve-prompt.md"];
+const PROMPTS = ["implement-prompt.md", "review-prompt.md", "research-prompt.md", "verify-prompt.md", "fix-prompt.md", "resolve-prompt.md"];
 for (const p of PROMPTS) fs.copyFileSync(path.join(AFK, ".sandcastle", p), path.join(dstSc, p));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "Dockerfile"), path.join(dstSc, "Dockerfile"));
 fs.copyFileSync(path.join(AFK, ".sandcastle", "lib", "make-gif.sh"), path.join(dstSc, "lib", "make-gif.sh"));

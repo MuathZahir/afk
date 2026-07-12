@@ -13,8 +13,10 @@
  * land on one `feat/<epic#>-<slug>` branch and become one PR.
  *
  * Pickup eligibility (mirrors project docs/agents/routing.md): parents/epics (`wayfinder:map` label
- * or any sub-issues) and HITL issues (`wayfinder:grilling` / `wayfinder:prototype`) are DEMOTED to
- * the human queue instead of run — only slices are AFK-eligible.
+ * or any sub-issues) and HITL issues (`wayfinder:grilling`) are DEMOTED to the human queue instead
+ * of run — only slices are AFK-eligible. `wayfinder:prototype` is eligible once a human applied the
+ * ready label, but the label alone forces the draft + `verify:live-pending` hold; a
+ * `wayfinder:research` candidate runs in research mode (findings comment, no PR).
  *
  * The parsing/decision helpers below are pure and unit-tested; `pick()` wraps them with the GitHub
  * calls.
@@ -79,8 +81,9 @@ export function resolveParentIssue(
 /**
  * Returns the demotion reason when a `ready-for-agent` issue must be routed to a human instead of
  * run, or null when it's an AFK-eligible slice. Exactly the routing.md rule — nothing more:
- * parents/epics (`wayfinder:map` or any sub-issues) and HITL work (`wayfinder:grilling`,
- * `wayfinder:prototype`) are never run.
+ * parents/epics (`wayfinder:map` or any sub-issues) and HITL work (`wayfinder:grilling`) are never
+ * run. `wayfinder:prototype` is NOT demoted — prototype building is eligible once a human applied
+ * the ready label; `requiresLiveVerify` is its safety net (draft + `verify:live-pending` hold).
  */
 export function ineligibleReason(input: { labels: string[]; subIssuesCount: number }): string | null {
   const has = (l: string) => input.labels.includes(l);
@@ -88,8 +91,8 @@ export function ineligibleReason(input: { labels: string[]; subIssuesCount: numb
     return "⛔ Routed to a human: labeled `wayfinder:map` — a map is a parent/epic, never a slice, so it is not AFK-eligible (docs/agents/routing.md).";
   if (input.subIssuesCount > 0)
     return "⛔ Routed to a human: this is a parent/epic with sub-issues — only slices are AFK-eligible (docs/agents/routing.md).";
-  for (const l of ["wayfinder:grilling", "wayfinder:prototype"] as const)
-    if (has(l)) return `⛔ Routed to a human: labeled \`${l}\` — human-in-the-loop by definition, not AFK-eligible (docs/agents/routing.md).`;
+  if (has("wayfinder:grilling"))
+    return "⛔ Routed to a human: labeled `wayfinder:grilling` — human-in-the-loop by definition, not AFK-eligible (docs/agents/routing.md).";
   return null;
 }
 
@@ -100,6 +103,21 @@ export function ineligibleReason(input: { labels: string[]; subIssuesCount: numb
  * skip code blocks either.
  */
 export const liveVerifyRequested = (body: string): boolean => /verify\s*\(live/i.test(body);
+
+/**
+ * The full live-verification decision: an explicit `Verify (live)` body request OR the
+ * `wayfinder:prototype` label — the label alone forces the draft + `verify:live-pending` hold, so
+ * a blind-built prototype is never presented as ready-for-review (routing.md, "Prototype tickets").
+ */
+export function requiresLiveVerify(body: string, labels: string[]): boolean {
+  return liveVerifyRequested(body) || labels.includes("wayfinder:prototype");
+}
+
+/** A `wayfinder:research` candidate runs the research lane (findings comment + close, no PR —
+ *  routing.md, "`wayfinder:research` tickets"); everything else is a normal implement. */
+export function issueMode(labels: string[]): "implement" | "research" {
+  return labels.includes("wayfinder:research") ? "research" : "implement";
+}
 
 /**
  * Fetch native metadata for all candidates in ONE batched GraphQL query (aliases per issue) —
@@ -274,9 +292,10 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
     if (deps.inFlight?.has(i.number)) continue; // its worker is running — no demote, no re-pick
     const body = i.body ?? "";
     const m = meta.get(i.number);
+    const labels = (i.labels ?? []).map((l) => l.name);
 
     // Pickup eligibility first: parents/epics + HITL issues get demoted, never run.
-    const demote = ineligibleReason({ labels: (i.labels ?? []).map((l) => l.name), subIssuesCount: m?.subIssuesCount ?? 0 });
+    const demote = ineligibleReason({ labels, subIssuesCount: m?.subIssuesCount ?? 0 });
     if (demote) { deps.onDemote(i.number, demote); continue; }
 
     const r = resolveFor(i);
@@ -310,7 +329,8 @@ export function pick(remaining: number, deps: PickDeps): Picked[] {
     out.push({
       number: i.number, title: i.title, branch: `afk/issue-${i.number}`,
       feature: branch, featureKey, featureTitle, base: r.base, baseSource: r.baseSource,
-      liveVerify: liveVerifyRequested(body),
+      liveVerify: requiresLiveVerify(body, labels),
+      mode: issueMode(labels),
     });
     if (out.length >= remaining) break;
   }
