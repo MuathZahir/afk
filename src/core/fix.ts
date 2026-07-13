@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
-import { Resolved } from "./config.js";
+import { agentEnv, Resolved } from "./config.js";
 import { Verdict } from "./types.js";
 import { readJson, streamLogging } from "./sh.js";
 import { cacheMounts } from "./cache.js";
@@ -49,7 +49,7 @@ async function runOnFeature(
     for (const f of ["blocked.json", "question.json", "summary.md"]) { try { fs.rmSync(path.join(afk, f), { force: true }); } catch { /* none */ } }
     const r = await sandbox.run({
       name,
-      agent: sandcastle.claudeCode(model, { env: { CLAUDE_CODE_OAUTH_TOKEN: cfg.oauth } }),
+      agent: sandcastle.claudeCode(model, { env: agentEnv(cfg) }),
       promptFile,
       completionSignal: "<promise>COMPLETE</promise>",
       idleTimeoutSeconds: cfg.idleTimeoutSec,

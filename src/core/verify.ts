@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
-import { Resolved } from "./config.js";
+import { agentEnv, Resolved } from "./config.js";
 import { Verdict } from "./types.js";
 import { readJson, slug, streamLogging } from "./sh.js";
 import { cacheMounts } from "./cache.js";
@@ -76,7 +76,7 @@ export async function verifyFeature(
     {
       await sandbox.run({
         name: `verify-${feature.branch}`,
-        agent: sandcastle.claudeCode(cfg.models.verify, { env: { CLAUDE_CODE_OAUTH_TOKEN: cfg.oauth } }),
+        agent: sandcastle.claudeCode(cfg.models.verify, { env: agentEnv(cfg) }),
         promptFile: PROMPT,
         completionSignal: "<promise>COMPLETE</promise>",
         idleTimeoutSeconds: cfg.idleTimeoutSec,

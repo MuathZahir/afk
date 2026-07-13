@@ -33,6 +33,18 @@ export type Resolved = {
   nmCacheDir: string;
 };
 
+/**
+ * Env injected into every in-sandbox Claude Code agent. Beyond auth, raise the Bash tool's
+ * foreground timeout: monorepo test gates (cold-cache jest) routinely outlive Claude's 2m default,
+ * which auto-backgrounds the command and sends the agent into a sleep/poll loop that wastes several
+ * minutes per gate. 10m default / 20m ceiling keeps those runs in the foreground.
+ */
+export const agentEnv = (cfg: Resolved): Record<string, string> => ({
+  CLAUDE_CODE_OAUTH_TOKEN: cfg.oauth,
+  BASH_DEFAULT_TIMEOUT_MS: "600000",
+  BASH_MAX_TIMEOUT_MS: "1200000",
+});
+
 /** Read config + env from the conventional locations and resolve all defaults. */
 export function loadConfig(cwd = process.cwd()): Resolved {
   const raw: Config = JSON.parse(fs.readFileSync(path.join(cwd, ".sandcastle", "afk.config.json"), "utf8"));

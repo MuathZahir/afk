@@ -22,7 +22,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker as dockerSandbox } from "@ai-hero/sandcastle/sandboxes/docker";
-import { Resolved } from "./config.js";
+import { agentEnv, Resolved } from "./config.js";
 import { Feature, Picked, Result, Verdict } from "./types.js";
 import { gh, git, isRateLimit, readJson, readText, slug, streamLogging } from "./sh.js";
 import { cacheActive, cacheMounts } from "./cache.js";
@@ -420,7 +420,7 @@ export class Engine {
             `with "category":"env" and stop.`;
           const r = await sandbox.run({
             name: `impl-#${p.number}${attempt ? `-retry${attempt}` : ""}`,
-            agent: sandcastle.claudeCode(this.cfg.models.implement, { env: { CLAUDE_CODE_OAUTH_TOKEN: this.cfg.oauth } }),
+            agent: sandcastle.claudeCode(this.cfg.models.implement, { env: agentEnv(this.cfg) }),
             promptFile: ".sandcastle/implement-prompt.md",
             completionSignal: "<promise>COMPLETE</promise>",
             promptArgs: { ISSUE_NUMBER: String(p.number), ISSUE_TITLE: p.title, BRANCH: p.branch, ISSUE_JSON: issueJson, RETRY_NOTE: retryNote },
@@ -620,7 +620,7 @@ export class Engine {
         await this.withController(agentId, this.cfg.absoluteTimeoutMs, (signal) =>
           sandbox!.run({
             name: `research-#${p.number}`,
-            agent: sandcastle.claudeCode(this.cfg.models.research, { env: { CLAUDE_CODE_OAUTH_TOKEN: this.cfg.oauth } }),
+            agent: sandcastle.claudeCode(this.cfg.models.research, { env: agentEnv(this.cfg) }),
             promptFile: ".sandcastle/research-prompt.md",
             completionSignal: "<promise>COMPLETE</promise>",
             maxIterations: 1,
@@ -717,7 +717,7 @@ export class Engine {
       await this.withController(reviewId, this.cfg.absoluteTimeoutMs, (signal) =>
         sandbox.run({
           name: `review-#${p.number}`,
-          agent: sandcastle.claudeCode(this.cfg.models.review, { env: { CLAUDE_CODE_OAUTH_TOKEN: this.cfg.oauth } }),
+          agent: sandcastle.claudeCode(this.cfg.models.review, { env: agentEnv(this.cfg) }),
           promptFile: ".sandcastle/review-prompt.md",
           completionSignal: "<promise>COMPLETE</promise>",
           maxIterations: 1,
